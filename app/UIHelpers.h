@@ -15,6 +15,12 @@ NSString *ui_string_from_utf8(const char *bytes);
 NSData   *ui_utf8_cstring(NSString *s);              /* bytes of s in UTF-8 plus a trailing NUL */
 #define UI_CPATH(s) ((const char *)[ui_utf8_cstring(s) bytes])
 
+/* [V] NSCalendarDate is standard OpenStep API (predates NSDateFormatter), but unlike NSDate/NSTimer
+ * (already relied on throughout PTYSession/SSHSession's own poll loops, confirmed on real
+ * hardware) it has not been exercised anywhere in these sibling projects before now -- confirm
+ * this actually works the first time RatChat runs on real OPENSTEP hardware. */
+NSString *ui_timestamp(void);                        /* "HH:MM", local time, for a chat line */
+
 /* Startup diagnostics.  If the file ~/.RatChat.trace exists (create it with `touch`), SSTrace()
  * appends printf-style lines to it; otherwise it does nothing.  Workspace discards a launched
  * application's stderr, so this is how to see how far a launch from Workspace got. */

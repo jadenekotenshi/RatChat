@@ -51,6 +51,7 @@ void irc_ctcp_strip(char *text, const char **verb, const char **body);
 int irc_fmt_privmsg(char *out, size_t outsz, const char *target, const char *text);
 int irc_fmt_notice(char *out, size_t outsz, const char *target, const char *text);
 int irc_fmt_action(char *out, size_t outsz, const char *target, const char *text);   /* CTCP ACTION */
+int irc_fmt_ctcp_reply(char *out, size_t outsz, const char *target, const char *verb, const char *arg);
 int irc_fmt_join(char *out, size_t outsz, const char *channel, const char *key);     /* key may be NULL */
 int irc_fmt_part(char *out, size_t outsz, const char *channel, const char *reason);  /* reason may be NULL */
 int irc_fmt_nick(char *out, size_t outsz, const char *nick);

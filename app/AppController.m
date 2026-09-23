@@ -31,6 +31,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [connection release];
     [connectController release];
     [myNick release];
+    [namesAccumulator release];
     [super dealloc];
 }
 
@@ -156,9 +157,13 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
         if ([joiner isEqualToString:myNick]) {
             IRCChannelSession *cs = [self sessionForTarget:chan kind:IRC_TARGET_CHANNEL createIfNeeded:YES];
             [cs appendSystemLine:[NSString stringWithFormat:@"Joined %@", chan]];
+            /* NAMES (353/366) follows automatically after a JOIN; nothing to request here. */
         } else {
             IRCChannelSession *cs = [self sessionForTarget:chan kind:IRC_TARGET_CHANNEL createIfNeeded:NO];
-            if (cs) [cs appendSystemLine:[NSString stringWithFormat:@"%@ has joined %@", joiner, chan]];
+            if (cs) {
+                [cs addMember:joiner];
+                [cs appendSystemLine:[NSString stringWithFormat:@"%@ has joined %@", joiner, chan]];
+            }
         }
         return;
     }
@@ -169,30 +174,74 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
         NSString *suffix = [reason length] ? [NSString stringWithFormat:@" (%@)", reason] : @"";
         IRCChannelSession *cs = [self sessionForTarget:chan kind:IRC_TARGET_CHANNEL createIfNeeded:NO];
         if (!cs) return;
-        if ([leaver isEqualToString:myNick])
+        if ([leaver isEqualToString:myNick]) {
             [cs appendSystemLine:[NSString stringWithFormat:@"You have left %@%@", chan, suffix]];
-        else
+        } else {
+            [cs removeMember:leaver];
             [cs appendSystemLine:[NSString stringWithFormat:@"%@ has left %@%@", leaver, chan, suffix]];
+        }
         return;
     }
     if (strcmp(msg->command, "QUIT") == 0) {
-        /* Not routed to individual channel windows -- would need per-channel membership tracking
-         * (no NAMES-list UI exists yet, see README). Shown in the status window only for now. */
+        /* Routed to every channel window the quitter was actually a member of (now that
+         * membership is tracked, via NAMES/JOIN/PART), plus the status window for a global view. */
         NSString *who = msg->has_prefix ? S(msg->prefix.nick) : @"";
         NSString *reason = msg->nparams > 0 ? S(msg->params[0]) : @"";
         NSString *suffix = [reason length] ? [NSString stringWithFormat:@" (%@)", reason] : @"";
+        int i;
+        for (i = 0; i < (int)[sessions count]; i++) {
+            IRCChannelSession *cs = [sessions objectAtIndex:i];
+            if ([cs kind] != IRC_TARGET_CHANNEL || ![[cs members] containsObject:who]) continue;
+            [cs removeMember:who];
+            [cs appendSystemLine:[NSString stringWithFormat:@"%@ has quit%@", who, suffix]];
+        }
         if (statusSession) [statusSession appendSystemLine:[NSString stringWithFormat:@"%@ has quit%@", who, suffix]];
         return;
     }
     if (strcmp(msg->command, "NICK") == 0) {
         NSString *oldNick = msg->has_prefix ? S(msg->prefix.nick) : @"";
         NSString *newNick = msg->nparams > 0 ? S(msg->params[0]) : @"";
+        int i;
+        for (i = 0; i < (int)[sessions count]; i++) {
+            IRCChannelSession *cs = [sessions objectAtIndex:i];
+            if ([cs kind] != IRC_TARGET_CHANNEL || ![[cs members] containsObject:oldNick]) continue;
+            [cs renameMemberFrom:oldNick to:newNick];
+            [cs appendSystemLine:[NSString stringWithFormat:@"%@ is now known as %@", oldNick, newNick]];
+        }
         if ([oldNick isEqualToString:myNick]) {
             [self setMyNick:newNick];
             if (statusSession) [statusSession appendSystemLine:[NSString stringWithFormat:@"You are now known as %@", newNick]];
         } else if (statusSession) {
             [statusSession appendSystemLine:[NSString stringWithFormat:@"%@ is now known as %@", oldNick, newNick]];
         }
+        return;
+    }
+    if (strcmp(msg->command, "353") == 0 && msg->nparams >= 4) {          /* RPL_NAMREPLY */
+        NSString *chan = S(msg->params[2]);
+        NSArray *raw = [S(msg->params[3]) componentsSeparatedByString:@" "];
+        NSMutableArray *acc;
+        NSEnumerator *e;
+        NSString *n;
+        if (!namesAccumulator) namesAccumulator = [[NSMutableDictionary alloc] init];
+        acc = [namesAccumulator objectForKey:chan];
+        if (!acc) { acc = [NSMutableArray array]; [namesAccumulator setObject:acc forKey:chan]; }
+        /* Status-prefix characters (@/+/%/~/&, marking an op/voiced/etc. member) are stripped so
+         * the stored nick matches exactly what JOIN/PART/QUIT/NICK message prefixes use -- kept as
+         * a decoration, a stored "@alice" would silently never match a QUIT for plain "alice". */
+        e = [raw objectEnumerator];
+        while ((n = [e nextObject])) {
+            if ([n length] == 0) continue;
+            if (strchr("@+%~&", [n characterAtIndex:0])) n = [n substringFromIndex:1];
+            if ([n length] > 0) [acc addObject:n];
+        }
+        return;
+    }
+    if (strcmp(msg->command, "366") == 0 && msg->nparams >= 2) {          /* RPL_ENDOFNAMES */
+        NSString *chan = S(msg->params[1]);
+        NSArray *acc = [namesAccumulator objectForKey:chan];
+        IRCChannelSession *cs = [self sessionForTarget:chan kind:IRC_TARGET_CHANNEL createIfNeeded:NO];
+        if (cs && acc) [cs setMembers:acc];
+        [namesAccumulator removeObjectForKey:chan];
         return;
     }
     if (strcmp(msg->command, "TOPIC") == 0) {
@@ -241,8 +290,28 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 
     textBuf[0] = '\0';
     if (msg->nparams > 1) { strncpy(textBuf, msg->params[1], sizeof(textBuf) - 1); textBuf[sizeof(textBuf) - 1] = '\0'; }
-
     if (msg->nparams == 0) return;
+
+    /* CTCP requests other than ACTION are answered (or just logged, for a NOTICE reply) silently
+     * -- checked before any session lookup so a VERSION/PING/TIME probe never pops open a query
+     * window for the sender the way a real conversational message should. */
+    if (irc_is_ctcp(textBuf) && strncmp(textBuf + 1, "ACTION", 6) != 0) {
+        const char *verb, *body;
+        irc_ctcp_strip(textBuf, &verb, &body);
+        if (!isNotice && msg->has_prefix) {
+            char line[IRC_MAX_LINE];
+            int n = -1;
+            if (strcmp(verb, "VERSION") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "VERSION", "RatChat 0.1.0 (OPENSTEP 4.2)");
+            else if (strcmp(verb, "PING") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "PING", body);
+            else if (strcmp(verb, "TIME") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "TIME",
+                                                     [[[NSCalendarDate calendarDate]
+                                                        descriptionWithCalendarFormat:@"%a %b %e %Y %H:%M:%S %Z"] cString]);
+            if (n > 0 && connection) [connection sendCommand:line length:n];
+        }
+        if (statusSession) [statusSession appendSystemLine:[NSString stringWithFormat:@"CTCP %s from %@", verb, fromNick]];
+        return;
+    }
+
     if (irc_is_channel(msg->params[0])) {
         cs = [self sessionForTarget:S(msg->params[0]) kind:IRC_TARGET_CHANNEL createIfNeeded:NO];
         if (!cs) cs = statusSession;
@@ -251,18 +320,13 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     }
     if (!cs) return;
 
-    if (irc_is_ctcp(textBuf)) {
+    if (irc_is_ctcp(textBuf)) {                          /* ACTION only, by now */
         const char *verb, *body;
         irc_ctcp_strip(textBuf, &verb, &body);
-        if (strcmp(verb, "ACTION") == 0) {
-            [cs appendLine:[NSString stringWithFormat:@"* %@ %@", fromNick, S(body)]];
-        } else if (!isNotice) {
-            /* Other CTCP requests (VERSION, PING, TIME, ...) are noted but not auto-answered yet. */
-            if (statusSession) [statusSession appendSystemLine:[NSString stringWithFormat:@"CTCP %s from %@", verb, fromNick]];
-        }
+        [cs appendMessage:S(body) fromNick:fromNick style:IRC_LINE_ACTION isOwn:NO];
         return;
     }
-    [cs appendLine:[NSString stringWithFormat:isNotice ? @"-%@- %@" : @"<%@> %@", fromNick, S(textBuf)]];
+    [cs appendMessage:S(textBuf) fromNick:fromNick style:(isNotice ? IRC_LINE_NOTICE : IRC_LINE_MESSAGE) isOwn:NO];
 }
 
 - (void)handleNumeric:(const irc_message *)msg
@@ -313,7 +377,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     }
     n = irc_fmt_privmsg(line, sizeof(line), [[cs target] cString], UI_CPATH(text));
     if (n > 0) [connection sendCommand:line length:n];
-    if (echo) [cs appendLine:[NSString stringWithFormat:@"<%@> %@", myNick, text]];
+    if (echo) [cs appendMessage:text fromNick:myNick style:IRC_LINE_MESSAGE isOwn:YES];
 }
 
 - (void)dispatchCommandLine:(NSString *)rest fromSession:(IRCChannelSession *)cs
@@ -365,7 +429,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
         if ([cs kind] == IRC_TARGET_STATUS) { NSRunAlertPanel(@"Action", @"Not in a channel.", @"OK", nil, nil); return; }
         n = irc_fmt_action(line, sizeof(line), [[cs target] cString], UI_CPATH(arg));
         if (n > 0) [connection sendCommand:line length:n];
-        [cs appendLine:[NSString stringWithFormat:@"* %@ %@", myNick, arg]];
+        [cs appendMessage:arg fromNick:myNick style:IRC_LINE_ACTION isOwn:YES];
         return;
     }
     if ([upperCmd isEqualToString:@"NICK"]) {

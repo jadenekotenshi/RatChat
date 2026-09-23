@@ -114,3 +114,8 @@ NSData *ui_utf8_cstring(NSString *s)
     [d appendBytes:"" length:1];
     return d;
 }
+
+NSString *ui_timestamp(void)
+{
+    return [[NSCalendarDate calendarDate] descriptionWithCalendarFormat:@"%H:%M"];
+}

@@ -205,11 +205,41 @@ int main(void)
     chan = find_session(ac, @"#test");
     EXPECT(wait_for_text(chan, @"Joined #test", 2.0), "the channel window shows the join confirmation");
 
+    /* NAMES (353, possibly several lines, then 366) populates the channel's own member list --
+     * checked directly against the tracked array, not the screen, since this has no visible line
+     * of its own. alice arrives op-prefixed ("@alice"), matching a real server's own NAMES
+     * format, and must still be stored as plain "alice" -- the prefix is stripped so it matches
+     * exactly what a later JOIN/PART/QUIT/NICK message prefix for her would say. */
+    fs_send(&fs, ":fake.server 353 ratty = #test :ratty @alice bob");
+    fs_send(&fs, ":fake.server 366 ratty #test :End of /NAMES list.");
+    spin(0.3);
+    EXPECT([[chan members] containsObject:@"ratty"] && [[chan members] containsObject:@"alice"] &&
+           [[chan members] containsObject:@"bob"], "RPL_NAMREPLY/RPL_ENDOFNAMES populates the channel member list (@-prefix stripped)");
+
+    /* A JOIN from someone new adds a member; a PART removes one -- both reflected in the tracked
+     * list, not just the displayed system line. */
+    fs_send(&fs, ":carol!carol@example.com JOIN #test");
+    EXPECT(wait_for_text(chan, @"carol has joined #test", 5.0), "someone else's JOIN is shown");
+    spin(0.2);
+    EXPECT([[chan members] containsObject:@"carol"], "someone else's JOIN adds them to the member list");
+
+    fs_send(&fs, ":bob!bob@example.com PART #test :done for now");
+    EXPECT(wait_for_text(chan, @"bob has left #test (done for now)", 5.0), "someone else's PART is shown");
+    spin(0.2);
+    EXPECT(![[chan members] containsObject:@"bob"], "PART removes them from the member list");
+
     /* Someone else's message, and a CTCP ACTION, arrive from the fake server. */
     fs_send(&fs, ":alice!alice@example.com PRIVMSG #test :hello there");
     EXPECT(wait_for_text(chan, @"<alice> hello there", 5.0), "an incoming channel PRIVMSG is displayed");
     fs_send(&fs, ":alice!alice@example.com PRIVMSG #test :\001ACTION waves\001");
     EXPECT(wait_for_text(chan, @"* alice waves", 5.0), "a CTCP ACTION is displayed as \"* nick action\"");
+
+    /* A CTCP VERSION request is answered automatically with a NOTICE (never a PRIVMSG, per CTCP
+     * convention), addressed back to the requester directly, not the channel it arrived through --
+     * and it must not pop open a query window for alice (checked further down: no query for her). */
+    fs_send(&fs, ":alice!alice@example.com PRIVMSG #test :\001VERSION\001");
+    EXPECT(fs_expect(&fs, @"NOTICE alice :\001VERSION RatChat", 5.0), "a CTCP VERSION request gets an automatic NOTICE reply");
+    EXPECT(find_session(ac, @"alice") == nil, "a CTCP request does not open a query window for the requester");
 
     /* The user replies; the outgoing PRIVMSG must reach the real socket, and echo locally too
      * (the server never echoes a client's own PRIVMSG back). */
@@ -221,6 +251,33 @@ int main(void)
     [ac channelSession:chan didSubmitLine:@"/me tests things"];
     EXPECT(fs_expect(&fs, @"\001ACTION tests things\001", 5.0), "/me sends a CTCP ACTION");
     EXPECT(wait_for_text(chan, @"* ratty tests things", 2.0), "/me echoes locally as an action");
+
+    /* Tab-completion and Up/Down history recall both live in -terminalView:sendBytes:length:,
+     * the real keystroke path -- unlike everything above, which used -channelSession:
+     * didSubmitLine: directly and so never touched either of them. alice is still a member
+     * (added via NAMES, never removed), so "al"+Tab should complete unambiguously. */
+    {
+        TerminalView *tv = find_terminal([chan window]);
+        [chan terminalView:tv sendBytes:(const unsigned char *)"al" length:2];
+        [chan terminalView:tv sendBytes:(const unsigned char *)"\t" length:1];
+        [chan terminalView:tv sendBytes:(const unsigned char *)"hey" length:3];
+        [chan terminalView:tv sendBytes:(const unsigned char *)"\r" length:1];
+        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0),
+               "Tab-completes an unambiguous member prefix, with a \": \" separator at line start");
+
+        /* Up-arrow (\033[A) recalls the last submitted line; Enter re-submits it verbatim. */
+        [chan terminalView:tv sendBytes:(const unsigned char *)"\033[A" length:3];
+        [chan terminalView:tv sendBytes:(const unsigned char *)"\r" length:1];
+        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0), "Up-arrow recalls the last submitted line");
+    }
+
+    /* A QUIT for someone tracked as a channel member (alice, from NAMES) must show up in that
+     * channel's own window now, not just the status window -- the gap the member list was
+     * specifically added to close. */
+    fs_send(&fs, ":alice!alice@example.com QUIT :leaving");
+    EXPECT(wait_for_text(chan, @"alice has quit (leaving)", 5.0), "a member's QUIT is shown in their channel window");
+    spin(0.2);
+    EXPECT(![[chan members] containsObject:@"alice"], "QUIT removes them from the member list");
 
     [ac channelSession:chan didSubmitLine:@"/nick rattier"];
     EXPECT(fs_expect(&fs, @"NICK rattier", 5.0), "/nick sends a real NICK command");

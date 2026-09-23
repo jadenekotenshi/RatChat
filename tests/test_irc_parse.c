@@ -146,6 +146,19 @@ static void t_fmt_action(void)
     CHECK(strcmp(buf, "PRIVMSG #chan :\001ACTION waves\001\r\n") == 0);
 }
 
+static void t_fmt_ctcp_reply(void)
+{
+    char buf[IRC_MAX_LINE];
+    CHECK(irc_fmt_ctcp_reply(buf, sizeof(buf), "alice", "VERSION", "RatChat 0.1.0") > 0);
+    CHECK(strcmp(buf, "NOTICE alice :\001VERSION RatChat 0.1.0\001\r\n") == 0);
+
+    CHECK(irc_fmt_ctcp_reply(buf, sizeof(buf), "alice", "PING", "12345") > 0);
+    CHECK(strcmp(buf, "NOTICE alice :\001PING 12345\001\r\n") == 0);
+
+    CHECK(irc_fmt_ctcp_reply(buf, sizeof(buf), "alice", "VERSION", NULL) > 0);
+    CHECK(strcmp(buf, "NOTICE alice :\001VERSION\001\r\n") == 0);
+}
+
 static void t_fmt_join_part(void)
 {
     char buf[IRC_MAX_LINE];
@@ -218,6 +231,7 @@ int main(void)
     t_ctcp();
     t_fmt_privmsg();
     t_fmt_action();
+    t_fmt_ctcp_reply();
     t_fmt_join_part();
     t_fmt_nick_user_quit_pong();
     t_fmt_too_small();

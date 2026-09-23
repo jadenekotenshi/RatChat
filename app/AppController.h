@@ -16,6 +16,7 @@
     IRCChannelSession  *statusSession;
     NSString           *myNick;
     int                 nickRetries;          /* auto-"_"-suffix retries on ERR_NICKNAMEINUSE */
+    NSMutableDictionary *namesAccumulator;    /* channel name -> NSMutableArray of nicks, mid-353/366 */
 }
 - (void)buildMenu;
 @end

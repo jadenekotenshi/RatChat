@@ -152,6 +152,21 @@ int irc_fmt_action(char *out, size_t outsz, const char *target, const char *text
     return build(out, outsz, "PRIVMSG", target, wrapped);
 }
 
+int irc_fmt_ctcp_reply(char *out, size_t outsz, const char *target, const char *verb, const char *arg)
+{
+    char wrapped[IRC_MAX_LINE];
+    size_t verbLen = strlen(verb);
+    size_t argLen = arg ? strlen(arg) : 0;
+    size_t n = 1 + verbLen + (arg ? 1 + argLen : 0);     /* "\001VERB[ arg]" */
+    if (n + 1 >= sizeof(wrapped)) n = sizeof(wrapped) - 2;
+    wrapped[0] = '\001';
+    memcpy(wrapped + 1, verb, verbLen);
+    if (arg) { wrapped[1 + verbLen] = ' '; memcpy(wrapped + 2 + verbLen, arg, argLen); }
+    wrapped[n] = '\001';
+    wrapped[n + 1] = '\0';
+    return build(out, outsz, "NOTICE", target, wrapped);
+}
+
 int irc_fmt_join(char *out, size_t outsz, const char *channel, const char *key)
 {
     return build(out, outsz, "JOIN", channel, key);

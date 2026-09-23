@@ -16,10 +16,20 @@ notices, and anything without a more specific home. Typing a line and pressing R
 a `PRIVMSG` to that window's target; lines starting with `/` are commands.
 
 Since a raw socket doesn't echo anything back the way a pty's line discipline does, each window
-does its own minimal local line editing (printable characters, backspace, Enter) -- see
-`IRCChannelSession.m`'s `-terminalView:sendBytes:length:` for why, and for the one subtlety that
-comes with it: an incoming message arriving mid-keystroke is spliced in around the user's
-not-yet-submitted line rather than corrupting it (erase, print, re-echo).
+does its own minimal local line editing (printable characters, backspace, Enter, Tab-completion,
+Up/Down history recall) -- see `IRCChannelSession.m`'s `-terminalView:sendBytes:length:` for why,
+and for the one subtlety that comes with it: an incoming message arriving mid-keystroke is spliced
+in around the user's not-yet-submitted line rather than corrupting it (erase, print, re-echo).
+
+Each channel window also carries a member list (from `NAMES`, kept in sync by `JOIN`/`PART`/`QUIT`/
+`NICK`), so `QUIT`/`NICK` notices show up in every channel the person was actually in, not just the
+status window. Messages are timestamped and each nick gets a consistent color (a small fixed
+palette, picked by hashing the nick, so the same person reads the same color for the life of the
+window); the local user's own messages are always bold instead, regardless of nick. `Tab` completes
+an unambiguous prefix against the current channel's member list (`: ` after a completion at the
+start of a line, matching the classic IRC-client convention for addressing someone; a plain space
+elsewhere); `Up`/`Down` recall previously submitted lines in that window. CTCP `VERSION`/`PING`/
+`TIME` requests get an automatic reply; other CTCP requests, and `ACTION`, are still just noted.
 
 **Commands**: `/join #channel [key]`, `/part [#channel] [reason]`, `/msg <target> <text>`,
 `/me <action>`, `/nick <newnick>`, `/quit [reason]`, `/close` (leaves+closes a channel window, or
@@ -29,36 +39,50 @@ is passed through as a raw command line, matching most real IRC clients -- there
 server already knows what to do with the raw line. A leading `//` sends a literal message starting
 with `/`.
 
-**Not built yet**: a NAMES/user list per channel (so `QUIT` notices go to the status window only,
-not to every channel the user was seen in -- there's no membership tracking to route them with),
-CTCP auto-replies (VERSION/PING/TIME requests are noted in the status window but not answered),
-saved server profiles, and any of the fancier IRCv3 capabilities (SASL, message tags, etc.).
+**Not built yet**: saved server profiles, in-line cursor movement within a line (Left/Right are
+silently dropped -- only append/backspace/Tab/history are supported), and any of the fancier IRCv3
+capabilities (SASL, message tags, etc.).
 
 ## What was verified, and what was not
 
 **Verified on the development Mac**:
 - `make test` -- `term/vt.c`'s own 259 checks (copied from StepTTY, unmodified, still passing:
-  no RatChat-specific coupling in the terminal emulator itself), plus 88 new checks for
+  no RatChat-specific coupling in the terminal emulator itself), plus 94 checks for
   `core/irc_parse.c` (prefix/command/param parsing, trailing-param edge cases, CTCP, and every
-  outgoing command formatter).
+  outgoing command formatter, including the CTCP-reply formatter).
 - `make irc-smoke` -- drives a *real* `AppController`/`IRCConnection`/`IRCChannelSession` stack
   against a scripted fake IRC server (a real TCP listener on `127.0.0.1`, not a mock): a real
   non-blocking `connect()`, real `NICK`/`USER` registration, `/join` opening a channel window on
-  the server's own `JOIN` confirmation (not optimistically), an incoming `PRIVMSG` and CTCP
-  `ACTION` both displaying correctly, typed replies reaching the real socket *and* echoing locally
-  (since the server never echoes a client's own message back), `/me`, `/nick` updating the
-  tracked nick only once the server confirms it, and `/quit`/disconnect. 19 checks, all passing.
+  the server's own `JOIN` confirmation (not optimistically), `NAMES` populating the member list
+  (with a real server's own `@`/`+`-prefixed format, and confirming the prefix is stripped so it
+  still matches a later `JOIN`/`PART`/`QUIT`/`NICK`), further `JOIN`/`PART` keeping that list in
+  sync, a `QUIT` for a tracked member showing up in *that member's* channel windows (not just
+  status), incoming `PRIVMSG`/CTCP `ACTION` display, an automatic reply to a CTCP `VERSION`
+  request (and confirming it does *not* pop open a query window for the requester), typed replies
+  reaching the real socket *and* echoing locally, Tab-completion and Up-arrow history recall driven
+  through the actual keystroke path (`-terminalView:sendBytes:length:`, not the higher-level
+  "line already submitted" shortcut most other checks use), `/me`, `/nick`, and `/quit`/disconnect.
+  30 checks, all passing.
 - `make check-objc`, `make lint`.
 
-**Confirmed on real OPENSTEP 4.2 hardware**: nothing yet -- this is a brand new project. Applied
+**Confirmed on real OPENSTEP 4.2 hardware** (2026-09-23): the app builds, launches via `open`, and
+successfully connects to a real server (`irc.86box.net`), sending and receiving messages. Applied
 proactively rather than left to be rediscovered a third time: the `__ICON` Mach-O segment
 Workspace Manager requires just to launch an app bundle at all (both StepSSH and StepTTY hit this
-before either had one). Everything else pty/fork/exec-specific that StepTTY had to work around on
-real hardware (`setsid`/`waitpid` not being linkable, `ONLCR`/`CRMOD`, `tcgetattr`/`tcsetattr`,
-`$TERM`) doesn't apply here at all -- RatChat never forks a child process, it only opens a raw TCP
-socket, using exactly the non-blocking connect/select/recv/send pattern `SSHSession.m` already
-proved works on real i386 *and* m68k hardware. That pattern should carry over the same way, but
-"should" is not "has" -- report back exactly what happens on the first real build/run.
+before either had one) -- and it worked on the very first try here. Everything else pty/fork/exec-
+specific that StepTTY had to work around on real hardware (`setsid`/`waitpid` not being linkable,
+`ONLCR`/`CRMOD`, `tcgetattr`/`tcsetattr`, `$TERM`) doesn't apply here at all -- RatChat never forks
+a child process, it only opens a raw TCP socket, using exactly the non-blocking connect/select/
+recv/send pattern `SSHSession.m` already proved works on real i386 *and* m68k hardware, and it
+carried over cleanly.
+
+**Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
+StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
+timestamps, Tab-completion/history, and CTCP auto-replies -- all added after that first real-
+hardware round. `NSCalendarDate` (used for timestamps and the CTCP `TIME` reply) is standard
+OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout this whole family of
+projects' poll loops), has not been exercised on real OPENSTEP hardware by any of these projects
+before -- worth checking first if anything looks off there specifically.
 
 ## Building
 
@@ -104,8 +128,10 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
   protocol engine to lean on for this the way SSH does) and outbound backpressure queue.
 - `app/IRCChannelSession.m`/`.h` -- new. One window per channel, query, or the server status;
   mirrors `PTYSession`/`SSHSession` closely (owns its window and `TerminalView`, is the window's
-  own close delegate), with local line editing standing in for what a pty's line discipline gave
-  StepTTY for free.
+  own close delegate), with local line editing (including Tab-completion and history recall)
+  standing in for what a pty's line discipline gave StepTTY for free. Channel windows also own a
+  member-list `NSTableView` sidebar (the same widget class StepSSH's `SFTPBrowser` already uses
+  for its file list), which `AppController` keeps in sync from `NAMES`/`JOIN`/`PART`/`QUIT`/`NICK`.
 - `app/AppController.m`/`.h` -- new. Owns the app's one `IRCConnection` and every open
   `IRCChannelSession`; is the connection's delegate (the central router deciding which window a
   parsed message belongs to, and formatting it for display) and each session's owner (dispatching
