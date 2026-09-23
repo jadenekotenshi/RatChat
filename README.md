@@ -71,23 +71,17 @@ specific that StepTTY had to work around on real hardware (`setsid`/`waitpid` no
 `ONLCR`/`CRMOD`, `tcgetattr`/`tcsetattr`, `$TERM`) doesn't apply here at all -- RatChat never forks
 a child process, it only opens a raw TCP socket, using exactly the non-blocking connect/select/
 recv/send pattern `SSHSession.m` already proved works on real i386 *and* m68k hardware, and it
-carried over cleanly.
+carried over cleanly. Also confirmed, in a later round the same day: `make fat` (i386+m68k+sparc)
+works, and the dedicated input-field layout (including Tab-completion/Up-Down history, so
+`-control:textView:doCommandBySelector:` does exist and work on real OPENSTEP 4.2) does the right
+thing.
 
-**Not yet confirmed on real hardware**: everything added after that first real-hardware round --
-the member list (`NSTableView`, used without issue in StepSSH's own `SFTPBrowser` but not yet
-exercised by RatChat there), per-nick colors and timestamps, CTCP auto-replies, and the dedicated
-input-field layout (moved off the original "type directly into the message log" design after
-real-hardware feedback that the interface felt too minimal). Two specific things worth checking
-first if anything looks off:
-- `NSCalendarDate` (timestamps, the CTCP `TIME` reply) is standard OpenStep API but, unlike
-  `NSDate`/`NSTimer` (already relied on throughout this whole family of projects' poll loops), has
-  not been exercised on real OPENSTEP hardware by any of these projects before.
-- `-control:textView:doCommandBySelector:` (the `NSTextField` delegate hook Tab-completion and
-  Up/Down history recall are both built on, letting the input field keep editing while intercepting
-  those specific keys) is standard OpenStep "Text System" API predating Mac OS X, but likewise not
-  yet exercised here. If it turns out to be missing, the graceful fallback is that Tab/Up/Down just
-  stop doing their special thing and fall back to the field's own default handling -- typing and
-  Return-to-submit (a plain target-action, unrelated to this hook) are unaffected either way.
+**Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
+StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
+timestamps, and CTCP auto-replies. `NSCalendarDate` (timestamps, the CTCP `TIME` reply) is standard
+OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout this whole family of
+projects' poll loops), has not been exercised on real OPENSTEP hardware by any of these projects
+before -- worth checking first if anything looks off there specifically.
 
 ## Building
 
