@@ -51,47 +51,100 @@ class Canvas:
 
 BLACK = (0, 0, 0)
 SHADOW = (85, 85, 85)
-BUBBLE = (150, 100, 210)
-BUBBLE_EAR = (120, 75, 180)
-DOT = (235, 225, 255)
+FUR = (150, 140, 135)
+FUR_DK = (110, 100, 96)
+PINK = (225, 150, 160)
+
+
+def blob_outlined(cv, bands, fur_color):
+    """bands: rows of (y0, y1, x0, x1) -- stacked bands approximating a rounded silhouette.
+    Draws a 1px black outline (each band's bounds expanded by 1) before the fur color on top,
+    so the whole combined shape reads with a crisp edge rather than blending into the background."""
+    for y0, y1, x0, x1 in bands:
+        cv.rect(x0 - 1, y0 - 1, x1 + 1, y1 + 1, BLACK)
+    for y0, y1, x0, x1 in bands:
+        cv.rect(x0, y0, x1, y1, fur_color)
 
 
 def draw():
     cv = Canvas()
     # drop shadow (NeXT icons carry one, down and to the right)
-    cv.rect(8, 11, 41, 38, SHADOW)
-    cv.bitmap(6, 34, ["..##....",
-                      ".####...",
-                      "######.."], SHADOW)
-    # two small rounded "ears" peeking above the bubble -- a light nod to "Rat" without needing
-    # fine enough detail at 48x48 to draw a whole rat
-    cv.rect(9, 3, 15, 9, BUBBLE_EAR)
-    cv.frame(9, 3, 15, 9, BLACK)
-    cv.rect(30, 3, 36, 9, BUBBLE_EAR)
-    cv.frame(30, 3, 36, 9, BLACK)
-    # speech bubble body, corners notched to suggest rounding at this resolution
-    cv.rect(6, 8, 39, 35, BUBBLE)
-    cv.frame(6, 8, 39, 35, BLACK)
-    for x, y in ((6, 8), (39, 8), (6, 35), (39, 35)):
-        cv.put(x, y, (0, 0, 0, 0))
-        cv.put(x, y - 1 if y > 20 else y + 1, BLACK)
-        cv.put(x - 1 if x > 20 else x + 1, y, BLACK)
-    # tail pointing down-left, like a real speech bubble
-    cv.bitmap(4, 34, ["...#",
-                      "..##",
-                      ".###",
-                      "###."], BUBBLE)
-    cv.bitmap(4, 33, ["...#",
-                      "..##",
-                      ".###",
-                      "####"], BLACK)
-    cv.bitmap(5, 34, ["..#",
-                      ".##",
-                      "###"], BUBBLE)
-    # three "typing..." dots
-    for dx in (13, 21, 29):
-        cv.rect(dx, 19, dx + 4, 23, DOT)
-        cv.frame(dx, 19, dx + 4, 23, BLACK)
+    cv.rect(10, 13, 45, 41, SHADOW)
+
+    # tail: a thin curve trailing off the back of the body, to the lower-left
+    cv.bitmap(1, 29, ["......###",
+                      "....###..",
+                      "..###....",
+                      ".##......",
+                      "##......."], BLACK)
+    cv.bitmap(2, 30, ["......##",
+                      "....###.",
+                      "..###...",
+                      ".##.....",
+                      "##......"], FUR_DK)
+
+    # body + head: one continuous stacked-band silhouette (body wide in the middle, tapering to
+    # the tail at the back and narrowing into the smaller head at the front), outlined as a whole
+    # so there is no seam where the two would otherwise meet.
+    blob_outlined(cv, [
+        (18, 19, 16, 30),
+        (20, 23, 12, 33),
+        (24, 31, 9, 35),
+        (32, 35, 11, 33),
+        (36, 38, 14, 29),
+        (39, 40, 17, 25),
+        (13, 14, 34, 40),
+        (15, 18, 31, 43),
+        (19, 24, 30, 44),
+        (25, 26, 32, 42),
+        (27, 27, 34, 40),
+    ], FUR)
+    # a little shading along the spine, on top of the fur (no separate outline needed here)
+    for y0, y1, x0, x1 in [(19, 24, 12, 15), (25, 33, 9, 12)]:
+        cv.rect(x0, y0, x1, y1, FUR_DK)
+
+    # feet, peeking out from under the body
+    cv.rect(15, 39, 19, 41, FUR_DK)
+    cv.rect(25, 39, 29, 41, FUR_DK)
+
+    # ears: two small circles overlapping the top of the head, so they read as attached rather
+    # than floating above it
+    cv.bitmap(28, 8, [".######.",
+                      "########",
+                      "########",
+                      "########",
+                      ".######."], BLACK)
+    cv.bitmap(36, 8, [".######.",
+                      "########",
+                      "########",
+                      "########",
+                      ".######."], BLACK)
+    cv.bitmap(29, 9, [".####.",
+                      "######",
+                      "######",
+                      ".####."], FUR)
+    cv.bitmap(37, 9, [".####.",
+                      "######",
+                      "######",
+                      ".####."], FUR)
+    cv.bitmap(30, 10, [".##.",
+                      "####",
+                      ".##."], PINK)
+    cv.bitmap(38, 10, [".##.",
+                      "####",
+                      ".##."], PINK)
+
+    # eye and nose
+    cv.rect(38, 19, 39, 20, BLACK)
+    cv.rect(42, 21, 43, 22, PINK)
+    cv.frame(42, 21, 43, 22, BLACK)
+
+    # whiskers
+    cv.bitmap(43, 20, ["#..",
+                      ".#."], BLACK)
+    cv.bitmap(43, 23, [".#.",
+                      "#.."], BLACK)
+
     return cv
 
 
