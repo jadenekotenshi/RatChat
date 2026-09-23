@@ -1,6 +1,7 @@
 #import "AppController.h"
 #import "UIHelpers.h"
 #include <string.h>
+#include "dcc.h"
 
 static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 
@@ -13,6 +14,9 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 - (void)handlePrivmsgOrNotice:(const irc_message *)msg isNotice:(BOOL)isNotice;
 - (void)handleNumeric:(const irc_message *)msg;
 - (void)dispatchCommandLine:(NSString *)rest fromSession:(IRCChannelSession *)cs;
+- (void)handleDCCRequest:(const char *)body fromNick:(NSString *)fromNick;
+- (IRCChannelSession *)sessionForDCCPeer:(NSString *)nick;
+- (void)dccSendFile:(NSString *)path toNick:(NSString *)nick;
 @end
 
 @implementation AppController
@@ -22,6 +26,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     self = [super init];
     if (!self) return nil;
     sessions = [[NSMutableArray alloc] init];
+    dccTransfers = [[NSMutableArray alloc] init];
     return self;
 }
 
@@ -32,6 +37,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [connectController release];
     [myNick release];
     [namesAccumulator release];
+    [dccTransfers release];
     [super dealloc];
 }
 
@@ -298,6 +304,10 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     if (irc_is_ctcp(textBuf) && strncmp(textBuf + 1, "ACTION", 6) != 0) {
         const char *verb, *body;
         irc_ctcp_strip(textBuf, &verb, &body);
+        if (strcmp(verb, "DCC") == 0 && !isNotice && msg->has_prefix) {
+            [self handleDCCRequest:body fromNick:fromNick];
+            return;
+        }
         if (!isNotice && msg->has_prefix) {
             char line[IRC_MAX_LINE];
             int n = -1;
@@ -455,6 +465,18 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
         if (n > 0) [connection sendCommand:line length:n];
         return;
     }
+    if ([upperCmd isEqualToString:@"DCC"]) {
+        NSArray *parts = [arg componentsSeparatedByString:@" "];
+        if ([parts count] >= 3 && [[parts objectAtIndex:0] caseInsensitiveCompare:@"send"] == NSOrderedSame) {
+            NSString *toNick = [parts objectAtIndex:1];
+            NSString *path = [[parts subarrayWithRange:NSMakeRange(2, [parts count] - 2)]
+                               componentsJoinedByString:@" "];
+            [self dccSendFile:path toNick:toNick];
+        } else {
+            NSRunAlertPanel(@"DCC", @"Usage: /dcc send <nick> <path>", @"OK", nil, nil);
+        }
+        return;
+    }
 
     /* Unknown /command: pass it through as a raw protocol line, matching most real IRC clients --
      * there are many commands (WHOIS, WHO, LIST, AWAY, KICK, INVITE, ...) not worth hand-coding
@@ -490,6 +512,136 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [sessions addObject:cs];
     [cs release];
     return cs;
+}
+
+/* ---------------------------------------------------------------- */
+/* DCC (direct client-to-client) file transfers                    */
+
+/* DCC status/progress is shown in the peer's own query window (auto-created if not already
+ * open), matching how an incoming private message is routed -- a DCC offer is, in spirit, a
+ * private conversation with that person. */
+- (IRCChannelSession *)sessionForDCCPeer:(NSString *)nick
+{
+    IRCChannelSession *cs = [self sessionForTarget:nick kind:IRC_TARGET_QUERY createIfNeeded:YES];
+    return cs ? cs : statusSession;
+}
+
+- (void)dccSendFile:(NSString *)path toNick:(NSString *)nick
+{
+    NSString *expanded = [path stringByExpandingTildeInPath];
+    NSString *myIP;
+    IRCChannelSession *dest = [self sessionForDCCPeer:nick];
+    DCCTransfer *t;
+    int port;
+
+    if (!connection || ![connection isConnected]) {
+        NSRunAlertPanel(@"DCC", @"Connect to a server first.", @"OK", nil, nil);
+        return;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:expanded]) {
+        NSRunAlertPanel(@"DCC", @"File not found: %@", @"OK", nil, nil, expanded);
+        return;
+    }
+    myIP = [connection localAddress];
+    if (![myIP length]) {
+        NSRunAlertPanel(@"DCC", @"Could not determine a local address to offer.", @"OK", nil, nil);
+        return;
+    }
+
+    t = [[DCCTransfer alloc] initWithDelegate:self];
+    port = [t beginSendFile:expanded toNick:nick];
+    if (port <= 0) {
+        NSRunAlertPanel(@"DCC", @"Could not open a socket to offer the file on.", @"OK", nil, nil);
+        [t release];
+        return;
+    }
+    {
+        char ctcpBody[DCC_MAX_FILENAME + 64];
+        char wrapped[DCC_MAX_FILENAME + 66];
+        char line[IRC_MAX_LINE];
+        int n;
+        unsigned long ipVal = dcc_ip_from_string([myIP cString]);
+        dcc_fmt_send_offer(ctcpBody, sizeof(ctcpBody), [[expanded lastPathComponent] cString],
+                           ipVal, port, [t totalSize]);
+        sprintf(wrapped, "\001%s\001", ctcpBody);
+        n = irc_fmt_privmsg(line, sizeof(line), [nick cString], wrapped);
+        if (n > 0) [connection sendCommand:line length:n];
+    }
+    [dccTransfers addObject:t];
+    [t release];
+    [dest appendSystemLine:[NSString stringWithFormat:@"Offering \"%@\" to %@ (%d bytes) -- waiting for them to accept...",
+                            [expanded lastPathComponent], nick, (int)[t totalSize]]];
+}
+
+- (void)handleDCCRequest:(const char *)body fromNick:(NSString *)fromNick
+{
+    dcc_send_offer offer;
+    IRCChannelSession *cs = [self sessionForDCCPeer:fromNick];
+
+    if (!dcc_parse_send(body, &offer)) {
+        [cs appendSystemLine:[NSString stringWithFormat:@"Unsupported DCC request from %@: %s", fromNick, body]];
+        return;
+    }
+    {
+        NSString *fname = S(offer.filename);
+        char ipbuf[16];
+        NSString *ipStr, *promptMsg;
+        int choice;
+
+        dcc_ip_to_string(offer.ip, ipbuf);
+        ipStr = [NSString stringWithCString:ipbuf];
+        promptMsg = [NSString stringWithFormat:@"%@ wants to send you \"%@\" (%d bytes) from %@:%d. Accept?",
+                     fromNick, fname, (int)offer.size, ipStr, offer.port];
+        choice = NSRunAlertPanel(@"Incoming File", @"%@", @"Accept", @"Decline", nil, promptMsg);
+
+        if (choice == NSAlertDefaultReturn) {
+            NSSavePanel *panel = [NSSavePanel savePanel];
+            [panel setTitle:@"Save Incoming File"];
+            if ([panel runModalForDirectory:NSHomeDirectory() file:fname] == NSOKButton) {
+                DCCTransfer *t = [[DCCTransfer alloc] initWithDelegate:self];
+                if ([t beginReceiveFromIP:ipStr port:offer.port size:offer.size
+                                    toPath:[panel filename] fromNick:fromNick]) {
+                    [dccTransfers addObject:t];
+                    [cs appendSystemLine:[NSString stringWithFormat:@"Receiving \"%@\" from %@...", fname, fromNick]];
+                } else {
+                    [cs appendSystemLine:@"Could not start the DCC transfer."];
+                }
+                [t release];
+            }
+        } else {
+            char ctcpBody[DCC_MAX_FILENAME + 32];
+            char line[IRC_MAX_LINE];
+            int n;
+            [cs appendSystemLine:[NSString stringWithFormat:@"Declined the file from %@.", fromNick]];
+            sprintf(ctcpBody, "REJECT SEND %s", offer.filename);
+            n = irc_fmt_ctcp_reply(line, sizeof(line), [fromNick cString], "DCC", ctcpBody);
+            if (n > 0 && connection) [connection sendCommand:line length:n];
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* DCCTransferDelegate                                               */
+
+- (void)dccTransferDidProgress:(DCCTransfer *)t
+{
+    IRCChannelSession *cs = [self sessionForDCCPeer:[t peerNick]];
+    [cs appendSystemLine:[NSString stringWithFormat:@"%@ \"%@\" with %@: %d%%",
+                          ([t direction] == DCC_SEND ? @"Sending" : @"Receiving"),
+                          [t filename], [t peerNick], [t percentDone]]];
+}
+
+- (void)dccTransferDidFinish:(DCCTransfer *)t success:(BOOL)success message:(NSString *)msg
+{
+    IRCChannelSession *cs = [self sessionForDCCPeer:[t peerNick]];
+    NSString *verb = ([t direction] == DCC_SEND ? @"Sending" : @"Receiving");
+    if (success) {
+        [cs appendSystemLine:[NSString stringWithFormat:@"%@ \"%@\" with %@ finished.", verb, [t filename], [t peerNick]]];
+    } else {
+        [cs appendSystemLine:[NSString stringWithFormat:@"%@ \"%@\" with %@ failed: %@",
+                              verb, [t filename], [t peerNick], msg]];
+    }
+    [dccTransfers removeObject:t];
 }
 
 @end

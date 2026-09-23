@@ -41,6 +41,7 @@ enum { IRC_DISCONNECTED, IRC_CONNECTING, IRC_REGISTERING, IRC_CONNECTED, IRC_END
 - (BOOL)isConnected;
 - (NSString *)host;
 - (NSString *)nick;
+- (NSString *)localAddress;    /* our own address as this socket's local endpoint (for DCC offers) */
 - (void)disconnectWithReason:(NSString *)reason;             /* sends QUIT, then tears down */
 - (void)shutdown;                                             /* no QUIT; just closes the socket */
 @end

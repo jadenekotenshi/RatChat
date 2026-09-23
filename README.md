@@ -31,22 +31,38 @@ are still just noted.
 
 **Commands**: `/join #channel [key]`, `/part [#channel] [reason]`, `/msg <target> <text>`,
 `/me <action>`, `/nick <newnick>`, `/quit [reason]`, `/close` (leaves+closes a channel window, or
-just closes a query window), `/raw <line>` (send anything as-is). Anything else starting with `/`
-is passed through as a raw command line, matching most real IRC clients -- there are many commands
-(`WHOIS`, `WHO`, `LIST`, `AWAY`, `KICK`, `INVITE`, ...) not worth hand-coding one at a time when the
-server already knows what to do with the raw line. A leading `//` sends a literal message starting
-with `/`.
+just closes a query window), `/raw <line>` (send anything as-is), `/dcc send <nick> <path>` (see
+below). Anything else starting with `/` is passed through as a raw command line, matching most
+real IRC clients -- there are many commands (`WHOIS`, `WHO`, `LIST`, `AWAY`, `KICK`, `INVITE`, ...)
+not worth hand-coding one at a time when the server already knows what to do with the raw line. A
+leading `//` sends a literal message starting with `/`.
 
-**Not built yet**: saved server profiles, and any of the fancier IRCv3 capabilities (SASL, message
-tags, etc.).
+**DCC file transfer** (`core/dcc.c`, `app/DCCTransfer.m`): `/dcc send <nick> <path>` offers a file
+-- RatChat opens a listening socket and sends the classic CTCP `DCC SEND` offer (filename, its own
+address as seen by the existing server connection, the port, the file size) as a `PRIVMSG` to that
+nick; the transfer itself is a completely separate direct connection from the peer, not routed
+through the IRC server at all. Receiving one prompts Accept/Decline, then (if accepted) where to
+save it; declining sends back a `DCC REJECT` notice. Progress is shown in that nick's own query
+window (auto-opened if not already open), roughly every 25% rather than on every chunk. No NAT
+traversal or manual address override -- the address offered is whatever the existing IRC
+connection's own local endpoint reports, which works on a LAN or a direct connection but not
+through most home routers' NAT without port forwarding. Also skips the old per-chunk 4-byte-ack
+convention some DCC implementations use for flow control, since TCP already provides that.
+
+**Not built yet**: TLS/SSL (plaintext only, and a real undertaking on this platform -- OPENSTEP
+4.2 has nothing to build on, so it would mean a from-scratch implementation on the scale of
+StepSSH's own SSH crypto), DCC CHAT (direct chat bypassing the server -- only DCC SEND, file
+transfer, is built), saved server profiles, and any of the fancier IRCv3 capabilities (SASL,
+message tags, etc.).
 
 ## What was verified, and what was not
 
 **Verified on the development Mac**:
 - `make test` -- `term/vt.c`'s own 259 checks (copied from StepTTY, unmodified, still passing:
-  no RatChat-specific coupling in the terminal emulator itself), plus 94 checks for
-  `core/irc_parse.c` (prefix/command/param parsing, trailing-param edge cases, CTCP, and every
-  outgoing command formatter, including the CTCP-reply formatter).
+  no RatChat-specific coupling in the terminal emulator itself), 94 checks for `core/irc_parse.c`
+  (prefix/command/param parsing, trailing-param edge cases, CTCP, and every outgoing command
+  formatter), and 30 checks for `core/dcc.c` (DCC SEND request parsing including quoted filenames,
+  the classic decimal IP encoding both ways, and every formatter, all round-tripped).
 - `make irc-smoke` -- drives a *real* `AppController`/`IRCConnection`/`IRCChannelSession` stack
   against a scripted fake IRC server (a real TCP listener on `127.0.0.1`, not a mock): a real
   non-blocking `connect()`, real `NICK`/`USER` registration, `/join` opening a channel window on
@@ -60,6 +76,12 @@ tags, etc.).
   through the same `-control:textView:doCommandBySelector:` call AppKit itself would make for a
   real Tab/Up keypress in the input field (not the higher-level "line already submitted" shortcut
   most other checks use), `/me`, `/nick`, and `/quit`/disconnect. 32 checks, all passing.
+- `make dcc-smoke` -- drives two real `DCCTransfer` instances (one sending, one receiving) against
+  each other over a real `127.0.0.1` connection: a real listen/accept and a real non-blocking
+  connect, a 200KB file (well over one 8KB read/write chunk, so several send()/recv() rounds are
+  actually exercised) copied byte-for-byte correctly end to end, progress notifications firing on
+  both sides, and a connection to a real-but-refusing port failing cleanly rather than hanging.
+  15 checks, all passing.
 - `make check-objc`, `make lint`.
 
 **Confirmed on real OPENSTEP 4.2 hardware** (2026-09-23): the app builds, launches via `open`, and
@@ -78,16 +100,21 @@ thing.
 
 **Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
 StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
-timestamps, and CTCP auto-replies. `NSCalendarDate` (timestamps, the CTCP `TIME` reply) is standard
-OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout this whole family of
-projects' poll loops), has not been exercised on real OPENSTEP hardware by any of these projects
-before -- worth checking first if anything looks off there specifically.
+timestamps, CTCP auto-replies, and DCC file transfer. `NSCalendarDate` (timestamps, the CTCP
+`TIME` reply) is standard OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on
+throughout this whole family of projects' poll loops), has not been exercised on real OPENSTEP
+hardware by any of these projects before -- worth checking first if anything looks off there
+specifically. DCC's own socket code is the same already-proven non-blocking connect/select/
+recv/send pattern as `IRCConnection`, plus a plain `listen()`/`accept()` for the sending side
+(also standard BSD sockets, no reason to expect trouble, but genuinely new to this codebase);
+`NSSavePanel` (used to choose where to save an incoming file) is confirmed working in StepSSH.
 
 ## Building
 
 ```sh
-make test        # FIRST: the terminal emulator core + IRC protocol parsing, on the dev host
+make test        # FIRST: the terminal emulator core + IRC/DCC protocol parsing, on the dev host
 make irc-smoke    # a real socket/connection/window session, end to end, against a fake server
+make dcc-smoke    # a real file transfer, end to end, between two DCCTransfer instances
 make lint check-objc     # style/portability checks
 ```
 
@@ -141,6 +168,14 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
 - `app/ConnectController.m`/`.h` -- new. A small server/port/nick/username/real-name panel,
   shaped like StepSSH's own connect panel but trimmed to what an unauthenticated IRC connection
   actually needs.
+- `core/dcc.c`/`.h` -- new. Pure C89, no I/O: parses/formats the CTCP `DCC SEND` request (including
+  quoted filenames) and the classic decimal-encoded IPv4 address DCC uses instead of a dotted
+  quad. `app/DCCTransfer.m`/`.h` -- new. One direct peer-to-peer file transfer, entirely separate
+  from the server connection it was negotiated over -- mirrors `IRCConnection`'s own non-blocking
+  connect/select/recv/send pattern and poll loop, plus a plain `listen()`/`accept()` for the
+  offering (sending) side, and its own accept/connect timeout (`IRCConnection` has one for
+  connecting; `DCCTransfer` needed one for *both* directions, since either side of a DCC offer can
+  simply never be answered).
 
 ## Startup diagnostics
 

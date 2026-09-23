@@ -42,10 +42,10 @@ ICONHDR   = app/RatChat.iconheader
 ICONTIFF  = app/RatChat.tiff
 ICONFLAGS = -sectcreate __ICON __header $(ICONHDR) -segprot __ICON r r -sectcreate __ICON app $(ICONTIFF)
 
-CORE_OBJS = core/irc_parse.o
+CORE_OBJS = core/irc_parse.o core/dcc.o
 TERM_OBJS = term/nsenc.o term/vt.o
-APP_OBJS  = app/AppController.o app/ConnectController.o app/IRCChannelSession.o app/IRCConnection.o \
-            app/TerminalView.o app/UIHelpers.o app/main.o
+APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IRCChannelSession.o \
+            app/IRCConnection.o app/TerminalView.o app/UIHelpers.o app/main.o
 
 .SUFFIXES: .c .m .o
 
@@ -77,9 +77,14 @@ build/test_irc_parse: tests/test_irc_parse.c $(CORE_OBJS)
 	-mkdir build
 	$(CC) $(CFLAGS) -o build/test_irc_parse tests/test_irc_parse.c $(CORE_OBJS)
 
-test: build/test_vt build/test_irc_parse
+build/test_dcc: tests/test_dcc.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_dcc tests/test_dcc.c $(CORE_OBJS)
+
+test: build/test_vt build/test_irc_parse build/test_dcc
 	build/test_vt
 	build/test_irc_parse
+	build/test_dcc
 
 # ---- install ----
 # OPENSTEP's own conventions: /LocalApps for a locally-built application (parallel to /NextApps

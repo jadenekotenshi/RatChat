@@ -61,6 +61,14 @@ typedef socklen_t sock_len_t;
 - (NSString *)host { return host; }
 - (NSString *)nick { return nick; }
 
+- (NSString *)localAddress
+{
+    struct sockaddr_in sa;
+    sock_len_t len = sizeof(sa);
+    if (fd < 0 || getsockname(fd, (struct sockaddr *)&sa, &len) != 0) return nil;
+    return [NSString stringWithCString:inet_ntoa(sa.sin_addr)];
+}
+
 - (BOOL)connectToHost:(NSString *)aHost port:(int)aPort nick:(NSString *)aNick
                   user:(NSString *)aUser realName:(NSString *)aRealName
 {

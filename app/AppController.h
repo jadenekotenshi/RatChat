@@ -2,6 +2,7 @@
 #import "IRCConnection.h"
 #import "IRCChannelSession.h"
 #import "ConnectController.h"
+#import "DCCTransfer.h"
 
 /* Owns the app's one server connection (see AskUserQuestion: "single server, multiple channel
  * windows" was the chosen scope) and every open IRCChannelSession window. Is IRCConnection's
@@ -17,6 +18,7 @@
     NSString           *myNick;
     int                 nickRetries;          /* auto-"_"-suffix retries on ERR_NICKNAMEINUSE */
     NSMutableDictionary *namesAccumulator;    /* channel name -> NSMutableArray of nicks, mid-353/366 */
+    NSMutableArray      *dccTransfers;        /* every active DCCTransfer, send or receive */
 }
 - (void)buildMenu;
 @end

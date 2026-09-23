@@ -28,9 +28,13 @@ $(BUILD)/test_vt: tests/test_vt.c $(TERM_OBJ)
 $(BUILD)/test_irc_parse: tests/test_irc_parse.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_irc_parse.c $(CORE_OBJ) -o $@
 
-test: $(BUILD)/test_vt $(BUILD)/test_irc_parse
+$(BUILD)/test_dcc: tests/test_dcc.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_dcc.c $(CORE_OBJ) -o $@
+
+test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
+	$(BUILD)/test_dcc
 
 lint:
 	sh tools/lint_openstep.sh
@@ -63,8 +67,8 @@ dist:
 # Drives a real AppController/IRCConnection/IRCChannelSession stack against a scripted fake IRC
 # server (a real TCP listener on 127.0.0.1) -- the closest thing to pty_smoke.m StepTTY has, just
 # against a fake IRC server instead of a real forked shell.
-UI_SRC = app/AppController.m app/ConnectController.m app/IRCChannelSession.m app/IRCConnection.m \
-         app/TerminalView.m app/UIHelpers.m
+UI_SRC = app/AppController.m app/ConnectController.m app/DCCTransfer.m app/IRCChannelSession.m \
+         app/IRCConnection.m app/TerminalView.m app/UIHelpers.m
 irc-smoke:
 	mkdir -p build
 	for f in tests/irc_smoke.m $(UI_SRC); do \
@@ -74,7 +78,18 @@ irc-smoke:
 	$(CC) build/is_*.o -framework Cocoa -o build/irc_smoke
 	build/irc_smoke
 
+# Drives two real DCCTransfer instances (one sending, one receiving) against each other over a
+# real 127.0.0.1 connection -- see the test file's own header for exactly what this covers versus
+# test_dcc.c and irc_smoke.m.
+dcc-smoke:
+	mkdir -p build
+	$(CC) -c -x objective-c -fno-objc-arc -w -g -Iterm -Iapp -Icore app/DCCTransfer.m -o build/ds_DCCTransfer.o
+	$(CC) -c -w -g -Icore core/dcc.c -o build/ds_c_dcc.o
+	$(CC) -c -x objective-c -fno-objc-arc -w -g -Iterm -Iapp -Icore tests/dcc_smoke.m -o build/ds_dcc_smoke.o
+	$(CC) build/ds_*.o -framework Cocoa -o build/dcc_smoke
+	build/dcc_smoke
+
 clean:
 	rm -rf build
 
-.PHONY: all test lint check-objc dist irc-smoke clean
+.PHONY: all test lint check-objc dist irc-smoke dcc-smoke clean
