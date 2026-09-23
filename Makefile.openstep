@@ -1,0 +1,193 @@
+# Build RatChat on OPENSTEP 4.2 (gcc 2.7.2).  Works with NeXT make or GNU make.
+#
+#   make -f Makefile.openstep test     # FIRST: run the C unit tests on the real compiler
+#   make -f Makefile.openstep          # build RatChat.app
+#   make -f Makefile.openstep install  # into /LocalApps (see below)
+#   make -f Makefile.openstep pkg      # RatChat.pkg for Installer.app (see below)
+#   make -f Makefile.openstep dist     # RatChat.pkg, gzipped as RatChat-<VERSION>-<letter>.tar.gz
+#   make -f Makefile.openstep fat          # RatChat.app as an i386+m68k+sparc fat binary (see below)
+#   make -f Makefile.openstep install-fat  # fat app into /LocalApps
+#   make -f Makefile.openstep pkg-fat      # RatChat.pkg with the fat build
+#   make -f Makefile.openstep dist-fat     # fat RatChat.pkg, gzipped as RatChat-<VERSION>-NIS.tar.gz
+#   make -f Makefile.openstep clean
+#
+# No GNU-make features are used (no wildcard, no pattern rules) so the stock
+# NeXT make can read it.  Object files are written next to their sources.
+#
+# Nothing in this file has been run on real OPENSTEP hardware yet -- RatChat is brand new. What it
+# carries over is proven technique from its sibling projects (StepSSH, StepTTY), applied here for
+# the first time rather than re-derived: the __ICON segment Workspace requires just to launch an
+# app bundle at all (both siblings hit this before they had one), and the pkg/.info/LongFileNames
+# mechanics StepSSH's own packaging saga worked out the hard way. RatChat's own networking code
+# (app/IRCConnection.m) mirrors StepSSH's SSHSession.m's raw-socket handling -- already confirmed
+# on real i386 and m68k hardware there -- closely enough that it should carry over the same way,
+# but "should" is not "has": report back exactly what happens on the first real build/run.
+
+CC       = cc
+OPT      = -O
+DEFS     = -DOPENSTEP
+ARCHS    =                        # e.g. -arch i386 -arch m68k -arch sparc; see `fat` below
+CFLAGS   = $(OPT) -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore
+LIBS     = -framework AppKit -framework Foundation
+APP      = RatChat.app
+VERSION  = 0.1.0
+
+# Workspace takes an application's icon (and its file-type table) from a read-only __ICON segment
+# linked into the executable, not from a file in the .app folder -- and, on real hardware, Workspace
+# Manager silently refuses to launch a bundle lacking one at all (confirmed twice already, in both
+# StepSSH and StepTTY, before either got its own icon -- applied here from the start instead of
+# waiting to hit the same failure a third time). app/RatChat.iconheader says which icon belongs to
+# the app; app/RatChat.tiff is the icon (regenerate: python3 tools/gen_icon.py).
+ICONHDR   = app/RatChat.iconheader
+ICONTIFF  = app/RatChat.tiff
+ICONFLAGS = -sectcreate __ICON __header $(ICONHDR) -segprot __ICON r r -sectcreate __ICON app $(ICONTIFF)
+
+CORE_OBJS = core/irc_parse.o
+TERM_OBJS = term/nsenc.o term/vt.o
+APP_OBJS  = app/AppController.o app/ConnectController.o app/IRCChannelSession.o app/IRCConnection.o \
+            app/TerminalView.o app/UIHelpers.o app/main.o
+
+.SUFFIXES: .c .m .o
+
+.c.o:
+	$(CC) $(CFLAGS) -c $< -o $@
+
+.m.o:
+	$(CC) $(CFLAGS) -c $< -o $@
+
+all: $(APP)/RatChat
+
+$(APP)/RatChat: $(CORE_OBJS) $(TERM_OBJS) $(APP_OBJS) $(ICONHDR) $(ICONTIFF)
+	-mkdir $(APP)
+	@( cd $(APP) ) >/dev/null 2>&1 || { echo "make: $(APP) is missing or is not a directory:"; ls -ld $(APP); echo "remove it and run make again"; exit 1; }
+	$(CC) $(ARCHS) -o $(APP)/RatChat $(CORE_OBJS) $(TERM_OBJS) $(APP_OBJS) $(ICONFLAGS) $(LIBS) || { echo "make: linking with the __ICON segment failed; retrying without an icon"; $(CC) $(ARCHS) -o $(APP)/RatChat $(CORE_OBJS) $(TERM_OBJS) $(APP_OBJS) $(LIBS); }
+
+# Show what was linked in: expect a segment __ICON with sections __header and app.
+iconcheck:
+	otool -l $(APP)/RatChat | grep -A 3 __ICON
+
+# ---- unit tests (plain C, no AppKit) ----
+# NOTE: OPENSTEP's mkdir has no -p option (it would create a directory named "-p").
+build/test_vt: tests/test_vt.c $(TERM_OBJS)
+	-mkdir build
+	@( cd build ) >/dev/null 2>&1 || { echo "make: build is missing or is not a directory:"; ls -ld build; echo "remove it and run make again"; exit 1; }
+	$(CC) $(CFLAGS) -o build/test_vt tests/test_vt.c $(TERM_OBJS)
+
+build/test_irc_parse: tests/test_irc_parse.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_irc_parse tests/test_irc_parse.c $(CORE_OBJS)
+
+test: build/test_vt build/test_irc_parse
+	build/test_vt
+	build/test_irc_parse
+
+# ---- install ----
+# OPENSTEP's own conventions: /LocalApps for a locally-built application (parallel to /NextApps
+# for vendor-shipped ones). Needs write access (root, typically); if mkdir/cp fails for that
+# reason, su or sudo and try again -- this target does not do that itself.
+APPDIR = /LocalApps
+
+install: all
+	-mkdir $(APPDIR)
+	rm -rf $(APPDIR)/$(APP)
+	cp -r $(APP) $(APPDIR)/
+	@echo "installed: $(APPDIR)/$(APP)"
+
+install-fat: clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
+	-mkdir $(APPDIR)
+	rm -rf $(APPDIR)/$(APP)
+	cp -r $(APP) $(APPDIR)/
+	@echo "installed fat (i386+m68k+sparc) binary: $(APPDIR)/$(APP)"
+
+# ---- Installer package (.pkg) ----
+# Built with the real packaging tool, not a hand-rolled imitation of its output -- see StepSSH's
+# own Makefile.openstep for the full story of how that mechanism was worked out (real HOWTO +
+# real reference package + real hardware, several rounds), and StepTTY's for the same mechanism
+# confirmed working a second time. Applying those lessons directly here rather than re-deriving
+# them: NEXTSTEP/OPENSTEP's Installer.app ships a csh script, /NextAdmin/Installer.app/package,
+# that takes a "fake root" tree (the payload, laid out under DefaultLocation as if it were /) and a
+# plain-text ".info" file (single "Keyword value" lines, NOT a "{ Key = value; }" property list)
+# and does everything else itself: the compressed archive, the .bom, the .sizes file, and the
+# finished .pkg. DefaultLocation /LocalApps with RatChat.app as the only payload -- one .pkg is
+# enough, there are no separate command-line tools the way StepSSH has. LongFileNames NO
+# (RatChat.app's own path is nowhere near the 100-character ustar limit, and YES was the actual
+# root cause of a hard-to-diagnose StepSSH install failure -- it silently selects a buggy bundled
+# tar variant for small archives). chgrp nogroup and chmod 444 on .sizes match a known-good
+# reference package's own structure exactly.
+PKG     = RatChat.pkg
+PKGROOT = pkgroot
+PKGINFO = RatChat.info
+
+pkg-assemble:
+	rm -rf $(PKG) $(PKGROOT) $(PKGINFO)
+	mkdir $(PKGROOT)
+	chgrp nogroup $(PKGROOT)
+	cp -r $(APP) $(PKGROOT)/
+	echo "Title RatChat" > $(PKGINFO)
+	echo "Version $(VERSION)" >> $(PKGINFO)
+	echo "Description A native IRC client for OPENSTEP." >> $(PKGINFO)
+	echo "DefaultLocation /LocalApps" >> $(PKGINFO)
+	echo "DiskName RatChat" >> $(PKGINFO)
+	echo "Relocatable YES" >> $(PKGINFO)
+	echo "Application YES" >> $(PKGINFO)
+	echo "UseUserMask YES" >> $(PKGINFO)
+	echo "LongFileNames NO" >> $(PKGINFO)
+	/NextAdmin/Installer.app/package $(PKGROOT)/ $(PKGINFO)
+	-chmod 444 $(PKG)/RatChat.sizes
+	rm -rf $(PKGROOT) $(PKGINFO)
+	@echo "built $(PKG) via the real Installer.app/package tool"
+
+pkg: all pkg-assemble
+
+pkg-fat: clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
+	$(MAKE) -f Makefile.openstep pkg-assemble
+
+# ---- distributable archive of the .pkg ----
+# Gzipped into RatChat-<VERSION>-<letter(s)>.tar.gz for handing out. The letter convention
+# (N=m68k, I=i386, S=sparc) matches StepSSH/StepTTY's own -- NIS for `dist-fat` (always, since
+# that's exactly what `fat`/`pkg-fat` build), or whichever single letter matches the machine `dist`
+# (thin) actually ran on, found with arch(1).
+dist: pkg
+	case "`arch`" in \
+	    m68k) suf=N ;; \
+	    i386) suf=I ;; \
+	    sparc) suf=S ;; \
+	    *) suf="`arch`" ;; \
+	esac; \
+	tar -cvf - $(PKG) | gzip -9c > RatChat-$(VERSION)-$$suf.tar.gz; \
+	echo "built RatChat-$(VERSION)-$$suf.tar.gz"
+
+dist-fat: pkg-fat
+	tar -cvf - $(PKG) | gzip -9c > RatChat-$(VERSION)-NIS.tar.gz
+	@echo "built RatChat-$(VERSION)-NIS.tar.gz"
+
+# ---- optional multi-architecture ("fat") build ----
+# NeXT's cc accepts several -arch flags in one invocation: each source is compiled once per
+# architecture and the per-arch object code is combined into one fat Mach-O file automatically,
+# and linking with the same set of -arch flags produces a fat executable. This only works if the
+# target architecture's compiler backend is actually installed as part of your Developer Tools;
+# the m68k/sparc components were separate from a plain Intel install on some OPENSTEP CD sets.
+#
+#   make -f Makefile.openstep fat-check    # fast: does cc even accept these -arch flags here?
+#   make -f Makefile.openstep fat          # full: RatChat.app as an i386+m68k+sparc fat binary
+#   make -f Makefile.openstep fat FATARCHS="-arch i386 -arch m68k"   # a different arch set
+FATARCHS = -arch i386 -arch m68k -arch sparc
+
+fat-check:
+	@echo "int main(void) { return 0; }" > /tmp/ratchat_fatcheck.c
+	$(CC) $(FATARCHS) -c /tmp/ratchat_fatcheck.c -o /tmp/ratchat_fatcheck.o
+	@echo "compiled for all requested architectures; slices actually present:"
+	lipo -info /tmp/ratchat_fatcheck.o
+	@rm -f /tmp/ratchat_fatcheck.c /tmp/ratchat_fatcheck.o
+
+fat: clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
+	@echo "== fat link done; architectures actually present in $(APP)/RatChat: =="
+	lipo -info $(APP)/RatChat
+
+clean:
+	rm -f core/*.o term/*.o app/*.o
+	rm -rf build $(APP) $(PKG) $(PKGROOT) $(PKGINFO)
+	rm -f RatChat-*.tar.gz
