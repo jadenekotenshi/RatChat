@@ -6,13 +6,13 @@ enum { IRC_LINE_MESSAGE, IRC_LINE_ACTION, IRC_LINE_NOTICE };
 
 /* One window: a channel, a private-message query, or the server "status" window (target=nil).
  * Mirrors PTYSession/SSHSession closely on purpose -- one class owns its window, its
- * TerminalView, and is the window's own close delegate -- with one real difference neither of
- * those needed: a pty's kernel line discipline (or, for SSHSession, the remote shell) echoes
- * typed input for free. A raw IRC socket doesn't echo anything back, so this class does its own
- * minimal local line editing (printable chars, backspace, Enter, Tab-completion, Up/Down history)
- * before ever telling its owner a line was submitted -- see -terminalView:sendBytes:length: in
- * the .m. Channel windows (not status/query) also carry a member list, kept in sync by the owner
- * from NAMES replies and JOIN/PART/QUIT/NICK. */
+ * TerminalView, and is the window's own close delegate. Unlike either of those, input lives in
+ * its own single-line NSTextField at the bottom of the window (the conventional IRC-client
+ * layout), not typed directly into the scrolling message log above it -- see the .m for why that
+ * needed its own local history/Tab-completion via the NSControl delegate hook rather than the
+ * raw-keystroke interception PTYSession/StepTTY's TerminalView-as-input model used. Channel
+ * windows (not status/query) also carry a member list, kept in sync by the owner from NAMES
+ * replies and JOIN/PART/QUIT/NICK. */
 @interface IRCChannelSession : NSObject
 {
     id             owner;
@@ -25,13 +25,10 @@ enum { IRC_LINE_MESSAGE, IRC_LINE_ACTION, IRC_LINE_NOTICE };
     NSTableView   *memberTable;         /* channel windows only */
     NSMutableArray *members;            /* sorted nicks; channel windows only */
 
-    char           lineBuf[512];
-    int            lineLen;
-
+    NSTextField    *inputField;
     NSMutableArray *history;            /* previously submitted lines, oldest first */
     int             historyPos;         /* -1: not browsing; else an index into history, from the end */
-    char            savedLine[512];     /* the in-progress line, stashed while browsing history */
-    int             savedLineLen;
+    NSString       *savedDraft;         /* the in-progress line, stashed while browsing history */
 }
 - (id)initWithOwner:(id)anOwner target:(NSString *)aTarget kind:(int)aKind;
 - (void)buildWindow;

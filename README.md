@@ -12,14 +12,11 @@ confirmed on real i386 and m68k hardware there) for its own `IRCConnection`.
 
 Connects to one IRC server (see "Server > Connect..."). Each joined channel and each private
 message conversation gets its own window; a "Server" status window shows the MOTD, connection
-notices, and anything without a more specific home. Typing a line and pressing Return sends it as
-a `PRIVMSG` to that window's target; lines starting with `/` are commands.
-
-Since a raw socket doesn't echo anything back the way a pty's line discipline does, each window
-does its own minimal local line editing (printable characters, backspace, Enter, Tab-completion,
-Up/Down history recall) -- see `IRCChannelSession.m`'s `-terminalView:sendBytes:length:` for why,
-and for the one subtlety that comes with it: an incoming message arriving mid-keystroke is spliced
-in around the user's not-yet-submitted line rather than corrupting it (erase, print, re-echo).
+notices, and anything without a more specific home. Each window is laid out the conventional IRC-
+client way: a read-only scrolling message log on top (with a member-list sidebar too, for channel
+windows), and a single-line input field of its own pinned to the bottom -- typing a line there and
+pressing Return sends it as a `PRIVMSG` to that window's target; lines starting with `/` are
+commands.
 
 Each channel window also carries a member list (from `NAMES`, kept in sync by `JOIN`/`PART`/`QUIT`/
 `NICK`), so `QUIT`/`NICK` notices show up in every channel the person was actually in, not just the
@@ -27,9 +24,10 @@ status window. Messages are timestamped and each nick gets a consistent color (a
 palette, picked by hashing the nick, so the same person reads the same color for the life of the
 window); the local user's own messages are always bold instead, regardless of nick. `Tab` completes
 an unambiguous prefix against the current channel's member list (`: ` after a completion at the
-start of a line, matching the classic IRC-client convention for addressing someone; a plain space
-elsewhere); `Up`/`Down` recall previously submitted lines in that window. CTCP `VERSION`/`PING`/
-`TIME` requests get an automatic reply; other CTCP requests, and `ACTION`, are still just noted.
+start of the field, matching the classic IRC-client convention for addressing someone; a plain
+space elsewhere); `Up`/`Down` recall previously submitted lines in that window's own input field.
+CTCP `VERSION`/`PING`/`TIME` requests get an automatic reply; other CTCP requests, and `ACTION`,
+are still just noted.
 
 **Commands**: `/join #channel [key]`, `/part [#channel] [reason]`, `/msg <target> <text>`,
 `/me <action>`, `/nick <newnick>`, `/quit [reason]`, `/close` (leaves+closes a channel window, or
@@ -39,9 +37,8 @@ is passed through as a raw command line, matching most real IRC clients -- there
 server already knows what to do with the raw line. A leading `//` sends a literal message starting
 with `/`.
 
-**Not built yet**: saved server profiles, in-line cursor movement within a line (Left/Right are
-silently dropped -- only append/backspace/Tab/history are supported), and any of the fancier IRCv3
-capabilities (SASL, message tags, etc.).
+**Not built yet**: saved server profiles, and any of the fancier IRCv3 capabilities (SASL, message
+tags, etc.).
 
 ## What was verified, and what was not
 
@@ -60,9 +57,9 @@ capabilities (SASL, message tags, etc.).
   status), incoming `PRIVMSG`/CTCP `ACTION` display, an automatic reply to a CTCP `VERSION`
   request (and confirming it does *not* pop open a query window for the requester), typed replies
   reaching the real socket *and* echoing locally, Tab-completion and Up-arrow history recall driven
-  through the actual keystroke path (`-terminalView:sendBytes:length:`, not the higher-level
-  "line already submitted" shortcut most other checks use), `/me`, `/nick`, and `/quit`/disconnect.
-  30 checks, all passing.
+  through the same `-control:textView:doCommandBySelector:` call AppKit itself would make for a
+  real Tab/Up keypress in the input field (not the higher-level "line already submitted" shortcut
+  most other checks use), `/me`, `/nick`, and `/quit`/disconnect. 32 checks, all passing.
 - `make check-objc`, `make lint`.
 
 **Confirmed on real OPENSTEP 4.2 hardware** (2026-09-23): the app builds, launches via `open`, and
@@ -76,13 +73,21 @@ a child process, it only opens a raw TCP socket, using exactly the non-blocking 
 recv/send pattern `SSHSession.m` already proved works on real i386 *and* m68k hardware, and it
 carried over cleanly.
 
-**Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
-StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
-timestamps, Tab-completion/history, and CTCP auto-replies -- all added after that first real-
-hardware round. `NSCalendarDate` (used for timestamps and the CTCP `TIME` reply) is standard
-OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout this whole family of
-projects' poll loops), has not been exercised on real OPENSTEP hardware by any of these projects
-before -- worth checking first if anything looks off there specifically.
+**Not yet confirmed on real hardware**: everything added after that first real-hardware round --
+the member list (`NSTableView`, used without issue in StepSSH's own `SFTPBrowser` but not yet
+exercised by RatChat there), per-nick colors and timestamps, CTCP auto-replies, and the dedicated
+input-field layout (moved off the original "type directly into the message log" design after
+real-hardware feedback that the interface felt too minimal). Two specific things worth checking
+first if anything looks off:
+- `NSCalendarDate` (timestamps, the CTCP `TIME` reply) is standard OpenStep API but, unlike
+  `NSDate`/`NSTimer` (already relied on throughout this whole family of projects' poll loops), has
+  not been exercised on real OPENSTEP hardware by any of these projects before.
+- `-control:textView:doCommandBySelector:` (the `NSTextField` delegate hook Tab-completion and
+  Up/Down history recall are both built on, letting the input field keep editing while intercepting
+  those specific keys) is standard OpenStep "Text System" API predating Mac OS X, but likewise not
+  yet exercised here. If it turns out to be missing, the graceful fallback is that Tab/Up/Down just
+  stop doing their special thing and fall back to the field's own default handling -- typing and
+  Return-to-submit (a plain target-action, unrelated to this hook) are unaffected either way.
 
 ## Building
 
@@ -128,10 +133,13 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
   protocol engine to lean on for this the way SSH does) and outbound backpressure queue.
 - `app/IRCChannelSession.m`/`.h` -- new. One window per channel, query, or the server status;
   mirrors `PTYSession`/`SSHSession` closely (owns its window and `TerminalView`, is the window's
-  own close delegate), with local line editing (including Tab-completion and history recall)
-  standing in for what a pty's line discipline gave StepTTY for free. Channel windows also own a
-  member-list `NSTableView` sidebar (the same widget class StepSSH's `SFTPBrowser` already uses
-  for its file list), which `AppController` keeps in sync from `NAMES`/`JOIN`/`PART`/`QUIT`/`NICK`.
+  own close delegate). Unlike either of those, input lives in its own single-line `NSTextField`
+  pinned to the bottom of the window, not typed directly into the scrolling log above it -- Tab-
+  completion and Up/Down history recall are both driven through the field's `-control:textView:
+  doCommandBySelector:` delegate hook rather than raw keystroke interception. Channel windows also
+  own a member-list `NSTableView` sidebar (the same widget class StepSSH's `SFTPBrowser` already
+  uses for its file list), which `AppController` keeps in sync from `NAMES`/`JOIN`/`PART`/`QUIT`/
+  `NICK`.
 - `app/AppController.m`/`.h` -- new. Owns the app's one `IRCConnection` and every open
   `IRCChannelSession`; is the connection's delegate (the central router deciding which window a
   parsed message belongs to, and formatting it for display) and each session's owner (dispatching

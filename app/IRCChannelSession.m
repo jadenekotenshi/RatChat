@@ -1,11 +1,12 @@
 #import "IRCChannelSession.h"
 #import "UIHelpers.h"
 
+#define INPUT_HEIGHT 24.0
+
 /* gcc 2.7.2 does not look ahead within an @implementation. */
 @interface IRCChannelSession (Private)
 - (void)buildWindow;
 - (void)writeFormattedLine:(NSString *)text dim:(BOOL)dim;
-- (void)replaceLineWithBytes:(const unsigned char *)bytes length:(int)n;
 - (void)recallHistory:(int)direction;
 - (void)handleTabComplete;
 - (int)indexOfMemberCI:(NSString *)nick;
@@ -41,7 +42,7 @@ static int nick_color_code(NSString *nick)
     [self shutdown];
     [target release];
     [window release]; [termView release]; [scroller release]; [memberTable release];
-    [members release]; [history release];
+    [members release]; [inputField release]; [history release]; [savedDraft release];
     [super dealloc];
 }
 
@@ -52,12 +53,16 @@ static int nick_color_code(NSString *nick)
 /* ---------------------------------------------------------------- */
 /* window (mirrors PTYSession's buildWindow closely)                */
 
+/* Message log + optional member list occupy everything above INPUT_HEIGHT; the input field is a
+ * full-width strip pinned to the bottom (NSViewMaxYMargin: the flexible gap is ABOVE it, so it
+ * stays put as the window resizes), under the member list too, not beside it. */
 - (void)buildWindow
 {
     static float offset = 0.0;
     NSSize cs;
     float sw = [NSScroller scrollerWidth];
     float memberWidth = (kind == IRC_TARGET_CHANNEL) ? 140.0 : 0.0;
+    float totalWidth, totalHeight;
     NSRect content;
     NSView *container;
     NSRect scr = [[NSScreen mainScreen] frame];
@@ -65,7 +70,9 @@ static int nick_color_code(NSString *nick)
     termView = [[TerminalView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
     [termView setUTF8:YES];             /* IRC message text: usually UTF-8, see UIHelpers.h */
     cs = [termView contentSizeForCols:80 rows:24];
-    content = NSMakeRect(0, 0, cs.width + sw + memberWidth, cs.height);
+    totalWidth = cs.width + sw + memberWidth;
+    totalHeight = cs.height + INPUT_HEIGHT;
+    content = NSMakeRect(0, 0, totalWidth, totalHeight);
 
     window = [[NSWindow alloc] initWithContentRect:content
                                          styleMask:(NSTitledWindowMask | NSClosableWindowMask |
@@ -74,21 +81,21 @@ static int nick_color_code(NSString *nick)
                                              defer:NO];
     [window setReleasedWhenClosed:NO];
     [window setDelegate:(id)self];
-    [window setMinSize:NSMakeSize(200 + memberWidth, 100)];
+    [window setMinSize:NSMakeSize(200 + memberWidth, 100 + INPUT_HEIGHT)];
     if ([window respondsToSelector:@selector(setResizeIncrements:)])
         [window setResizeIncrements:NSMakeSize(1, 1)];
 
     container = [[NSView alloc] initWithFrame:content];
-    [termView setFrame:NSMakeRect(0, 0, cs.width, cs.height)];
+    [termView setFrame:NSMakeRect(0, INPUT_HEIGHT, cs.width, cs.height)];
     [termView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
-    scroller = [[NSScroller alloc] initWithFrame:NSMakeRect(cs.width, 0, sw, cs.height)];
+    scroller = [[NSScroller alloc] initWithFrame:NSMakeRect(cs.width, INPUT_HEIGHT, sw, cs.height)];
     [scroller setAutoresizingMask:(NSViewHeightSizable | NSViewMinXMargin)];
     [container addSubview:termView];
     [container addSubview:scroller];
 
     if (kind == IRC_TARGET_CHANNEL) {
         NSScrollView *memberScroll = [[[NSScrollView alloc]
-            initWithFrame:NSMakeRect(cs.width + sw, 0, memberWidth, cs.height)] autorelease];
+            initWithFrame:NSMakeRect(cs.width + sw, INPUT_HEIGHT, memberWidth, cs.height)] autorelease];
         NSTableColumn *col = [[[NSTableColumn alloc] initWithIdentifier:@"nick"] autorelease];
         [[col headerCell] setStringValue:@"Members"];
         [col setWidth:memberWidth - 4.0];
@@ -104,6 +111,13 @@ static int nick_color_code(NSString *nick)
         [container addSubview:memberScroll];
     }
 
+    inputField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, totalWidth, INPUT_HEIGHT)];
+    [inputField setAutoresizingMask:(NSViewWidthSizable | NSViewMaxYMargin)];
+    [inputField setTarget:self];
+    [inputField setAction:@selector(inputSubmitted:)];
+    [inputField setDelegate:self];
+    [container addSubview:inputField];
+
     [window setContentView:container];
     [container release];
 
@@ -114,7 +128,7 @@ static int nick_color_code(NSString *nick)
     offset += 24.0;
     if (offset > 240.0) offset = 0.0;
     [window makeKeyAndOrderFront:nil];
-    [window makeFirstResponder:termView];
+    [window makeFirstResponder:inputField];
 }
 
 /* ---------------------------------------------------------------- */
@@ -173,26 +187,19 @@ static int nick_color_code(NSString *nick)
 /* ---------------------------------------------------------------- */
 /* display                                                           */
 
-/* Erases whatever the user has typed so far (if anything), writes `text` as its own line, then
- * re-echoes the in-progress input so the user can keep typing where they left off -- otherwise an
- * incoming message arriving mid-keystroke would interleave with, and corrupt, the user's own not-
- * yet-submitted line (the classic problem any raw-terminal chat program has to solve, since there
- * is no line-discipline doing this for us the way a pty gave PTYSession for free). */
+/* Input lives in its own field now, never in termView itself, so there is no in-progress typed
+ * line to protect from corruption here anymore (contrast StepTTY's PTYSession, or this class's own
+ * previous revision, where typing and display shared one view). */
 - (void)writeFormattedLine:(NSString *)text dim:(BOOL)dim
 {
-    static const unsigned char eraseOne[3] = { 0x08, ' ', 0x08 };
     static const unsigned char crlf[2] = { '\r', '\n' };
     static const unsigned char dimOn[4]  = { 0x1b, '[', '2', 'm' };
     static const unsigned char dimOff[4] = { 0x1b, '[', '0', 'm' };
-    int i;
     const char *cstr = UI_CPATH(text);
-
-    for (i = 0; i < lineLen; i++) [termView writeBytes:eraseOne length:3];
     if (dim) [termView writeBytes:dimOn length:4];
     [termView writeBytes:(const unsigned char *)cstr length:(int)strlen(cstr)];
     if (dim) [termView writeBytes:dimOff length:4];
     [termView writeBytes:crlf length:2];
-    if (lineLen > 0) [termView writeBytes:(const unsigned char *)lineBuf length:lineLen];
 }
 
 /* `style` picks the wrapper ("<nick> text", "* nick text", or "-nick- text"); the nick itself is
@@ -223,75 +230,66 @@ static int nick_color_code(NSString *nick)
 }
 
 /* ---------------------------------------------------------------- */
-/* TerminalView delegate: local line editing (see the .h for why)   */
+/* the input field                                                   */
 
-- (void)replaceLineWithBytes:(const unsigned char *)bytes length:(int)n
+- (void)inputSubmitted:(id)sender
 {
-    static const unsigned char eraseOne[3] = { 0x08, ' ', 0x08 };
-    int i;
-    for (i = 0; i < lineLen; i++) [termView writeBytes:eraseOne length:3];
-    if (n > (int)sizeof(lineBuf) - 1) n = sizeof(lineBuf) - 1;
-    memcpy(lineBuf, bytes, (size_t)n);
-    lineLen = n;
-    if (lineLen > 0) [termView writeBytes:(const unsigned char *)lineBuf length:lineLen];
+    NSString *text = ui_trim([inputField stringValue]);
+    [inputField setStringValue:@""];
+    historyPos = -1;
+    if ([text length] == 0) return;
+    if (!history) history = [[NSMutableArray alloc] init];
+    [history addObject:text];
+    if ([owner respondsToSelector:@selector(channelSession:didSubmitLine:)])
+        [owner channelSession:self didSubmitLine:text];
 }
 
-/* direction: -1 = older (Up), +1 = newer (Down). The in-progress line is stashed (as raw bytes,
- * not round-tripped through NSString) the first time the user arrows up, and restored verbatim if
- * they arrow back down past the newest history entry. */
+/* direction: -1 = older (Up), +1 = newer (Down). The in-progress draft is stashed the first time
+ * the user arrows up, and restored verbatim if they arrow back down past the newest entry. */
 - (void)recallHistory:(int)direction
 {
     int count = history ? (int)[history count] : 0;
-    NSString *entry = nil;
 
     if (direction < 0) {
         if (count == 0) return;
         if (historyPos == -1) {
-            savedLineLen = lineLen;
-            memcpy(savedLine, lineBuf, (size_t)lineLen);
+            [savedDraft release];
+            savedDraft = [[inputField stringValue] retain];
             historyPos = count - 1;
         } else if (historyPos > 0) {
             historyPos--;
         } else {
             return;
         }
-        entry = [history objectAtIndex:historyPos];
+        [inputField setStringValue:[history objectAtIndex:historyPos]];
     } else {
         if (historyPos == -1) return;
         if (historyPos < count - 1) {
             historyPos++;
-            entry = [history objectAtIndex:historyPos];
+            [inputField setStringValue:[history objectAtIndex:historyPos]];
         } else {
             historyPos = -1;
+            [inputField setStringValue:(savedDraft ? savedDraft : @"")];
         }
-    }
-
-    if (entry) {
-        const char *bytes = UI_CPATH(entry);
-        [self replaceLineWithBytes:(const unsigned char *)bytes length:(int)strlen(bytes)];
-    } else {
-        [self replaceLineWithBytes:(const unsigned char *)savedLine length:savedLineLen];
     }
 }
 
-/* Completes the word under the cursor (the buffer's own append-only "cursor", i.e. its end --
- * there is no in-line cursor movement yet) against the channel's member list. Only acts on a
- * single unambiguous match; multiple or no matches do nothing. A completion at the very start of
- * the line (addressing someone) gets ": " after it, matching the classic IRC-client convention;
- * anywhere else just gets a space. */
+/* Completes the word under the cursor -- the last space-separated word in the field, since
+ * NSTextField doesn't expose the field editor's insertion point through this delegate hook --
+ * against the channel's member list. Only acts on a single unambiguous match. A completion at the
+ * very start of the field (addressing someone) gets ": " after it, the classic IRC-client
+ * convention; anywhere else just gets a space. */
 - (void)handleTabComplete
 {
+    NSString *text, *word, *match = nil;
+    NSRange lastSpace;
     int start, i, matchCount = 0;
-    NSString *word, *match = nil;
-    const char *suffix; int suffixLen;
-    const char *sep; int sepLen;
 
     if (kind != IRC_TARGET_CHANNEL || !members || [members count] == 0) return;
-    start = lineLen;
-    while (start > 0 && lineBuf[start - 1] != ' ') start--;
-    if (start == lineLen) return;
-    lineBuf[lineLen] = '\0';                              /* safe: lineLen is always < sizeof(lineBuf)-1 */
-    word = ui_string_from_utf8(lineBuf + start);
+    text = [inputField stringValue];
+    lastSpace = [text rangeOfString:@" " options:NSBackwardsSearch];
+    start = (lastSpace.location == NSNotFound) ? 0 : (int)(lastSpace.location + 1);
+    word = [text substringFromIndex:start];
     if ([word length] == 0) return;
 
     for (i = 0; i < (int)[members count]; i++) {
@@ -304,61 +302,31 @@ static int nick_color_code(NSString *nick)
     }
     if (matchCount != 1) return;
 
-    suffix = UI_CPATH([match substringFromIndex:[word length]]);
-    suffixLen = (int)strlen(suffix);
-    for (i = 0; i < suffixLen && lineLen < (int)sizeof(lineBuf) - 1; i++) {
-        lineBuf[lineLen++] = suffix[i];
-        [termView writeBytes:(const unsigned char *)&suffix[i] length:1];
-    }
-    sep = (start == 0) ? ": " : " ";
-    sepLen = (int)strlen(sep);
-    if (lineLen + sepLen < (int)sizeof(lineBuf) - 1) {
-        memcpy(lineBuf + lineLen, sep, (size_t)sepLen);
-        lineLen += sepLen;
-        [termView writeBytes:(const unsigned char *)sep length:sepLen];
-    }
+    [inputField setStringValue:[[[text substringToIndex:start] stringByAppendingString:match]
+                                  stringByAppendingString:(start == 0) ? @": " : @" "]];
 }
+
+/* [V] The NSControl delegate hook for intercepting field-editor commands (Tab/Up/Down) while
+ * editing continues, rather than waiting for editing to end -- standard OpenStep API (the "Text
+ * System"'s doCommandBySelector: dispatch predates Mac OS X), but not yet exercised by any of
+ * these sibling projects, so not yet confirmed present on real OPENSTEP 4.2 specifically. If it
+ * turns out missing there, the graceful fallback is simply that Tab/Up/Down stop doing their
+ * special thing and fall back to NSTextField's own default handling -- Return/submission (a plain
+ * target-action, definitely safe) is unaffected either way. */
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector
+{
+    if (commandSelector == @selector(insertTab:)) { [self handleTabComplete]; return YES; }
+    if (commandSelector == @selector(moveUp:)) { [self recallHistory:-1]; return YES; }
+    if (commandSelector == @selector(moveDown:)) { [self recallHistory:1]; return YES; }
+    return NO;
+}
+
+/* ---------------------------------------------------------------- */
+/* TerminalView delegate                                             */
 
 - (void)terminalView:(id)tv sendBytes:(const unsigned char *)bytes length:(int)n
 {
-    int i;
-
-    if (n == 3 && bytes[0] == 0x1b && bytes[1] == '[' && (bytes[2] == 'A' || bytes[2] == 'B')) {
-        [self recallHistory:(bytes[2] == 'A') ? -1 : 1];
-        return;
-    }
-
-    for (i = 0; i < n; i++) {
-        unsigned char c = bytes[i];
-        if (c == '\r' || c == '\n') {
-            static const unsigned char crlf[2] = { '\r', '\n' };
-            NSString *submitted;
-            lineBuf[lineLen] = '\0';
-            [termView writeBytes:crlf length:2];
-            submitted = ui_string_from_utf8(lineBuf);
-            lineLen = 0;
-            historyPos = -1;
-            if ([submitted length] > 0) {
-                if (!history) history = [[NSMutableArray alloc] init];
-                [history addObject:submitted];
-                if ([owner respondsToSelector:@selector(channelSession:didSubmitLine:)])
-                    [owner channelSession:self didSubmitLine:submitted];
-            }
-        } else if (c == 0x08 || c == 0x7f) {
-            if (lineLen > 0) {
-                static const unsigned char erase[3] = { 0x08, ' ', 0x08 };
-                lineLen--;
-                [termView writeBytes:erase length:3];
-            }
-        } else if (c == 0x09) {
-            [self handleTabComplete];
-        } else if (c >= 0x20 && lineLen < (int)sizeof(lineBuf) - 1) {
-            lineBuf[lineLen++] = (char)c;
-            [termView writeBytes:&c length:1];
-        }
-        /* other control bytes (e.g. left/right-arrow escape sequences) are dropped for now -- no
-         * in-line cursor movement yet, see README for what's not built. */
-    }
+    /* The message log is read-only now -- typing happens in inputField. Nothing to forward. */
 }
 
 - (void)terminalView:(id)tv resizedToCols:(int)cols rows:(int)rows

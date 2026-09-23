@@ -252,23 +252,26 @@ int main(void)
     EXPECT(fs_expect(&fs, @"\001ACTION tests things\001", 5.0), "/me sends a CTCP ACTION");
     EXPECT(wait_for_text(chan, @"* ratty tests things", 2.0), "/me echoes locally as an action");
 
-    /* Tab-completion and Up/Down history recall both live in -terminalView:sendBytes:length:,
-     * the real keystroke path -- unlike everything above, which used -channelSession:
-     * didSubmitLine: directly and so never touched either of them. alice is still a member
+    /* Tab-completion and Up/Down history recall both live behind the NSControl delegate hook
+     * (-control:textView:doCommandBySelector:), driven here the same way AppKit would drive it
+     * for a real Tab/Up keypress in the field editor -- not the higher-level -channelSession:
+     * didSubmitLine:/-inputSubmitted: shortcuts everything above uses. alice is still a member
      * (added via NAMES, never removed), so "al"+Tab should complete unambiguously. */
     {
-        TerminalView *tv = find_terminal([chan window]);
-        [chan terminalView:tv sendBytes:(const unsigned char *)"al" length:2];
-        [chan terminalView:tv sendBytes:(const unsigned char *)"\t" length:1];
-        [chan terminalView:tv sendBytes:(const unsigned char *)"hey" length:3];
-        [chan terminalView:tv sendBytes:(const unsigned char *)"\r" length:1];
-        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0),
+        NSTextField *field = [chan valueForKey:@"inputField"];
+        [field setStringValue:@"al"];
+        [chan control:nil textView:nil doCommandBySelector:@selector(insertTab:)];
+        EXPECT([[field stringValue] isEqualToString:@"alice: "],
                "Tab-completes an unambiguous member prefix, with a \": \" separator at line start");
+        [field setStringValue:[[field stringValue] stringByAppendingString:@"hey"]];
+        [chan inputSubmitted:nil];
+        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0), "the Tab-completed line is sent correctly");
 
-        /* Up-arrow (\033[A) recalls the last submitted line; Enter re-submits it verbatim. */
-        [chan terminalView:tv sendBytes:(const unsigned char *)"\033[A" length:3];
-        [chan terminalView:tv sendBytes:(const unsigned char *)"\r" length:1];
-        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0), "Up-arrow recalls the last submitted line");
+        /* Up-arrow recalls the last submitted line; Enter re-submits it verbatim. */
+        [chan control:nil textView:nil doCommandBySelector:@selector(moveUp:)];
+        EXPECT([[field stringValue] isEqualToString:@"alice: hey"], "Up-arrow recalls the last submitted line");
+        [chan inputSubmitted:nil];
+        EXPECT(fs_expect(&fs, @"PRIVMSG #test :alice: hey", 5.0), "the recalled line re-sends correctly");
     }
 
     /* A QUIT for someone tracked as a channel member (alice, from NAMES) must show up in that
