@@ -461,7 +461,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
         if (!isNotice && msg->has_prefix) {
             char line[IRC_MAX_LINE];
             int n = -1;
-            if (strcmp(verb, "VERSION") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "VERSION", "RatChat 0.1.0 (OPENSTEP 4.2)");
+            if (strcmp(verb, "VERSION") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "VERSION", "RatChat 0.2.0 (OPENSTEP 4.2)");
             else if (strcmp(verb, "PING") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "PING", body);
             else if (strcmp(verb, "TIME") == 0) n = irc_fmt_ctcp_reply(line, sizeof(line), msg->prefix.nick, "TIME",
                                                      [[[NSCalendarDate calendarDate]
