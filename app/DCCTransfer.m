@@ -67,7 +67,7 @@ typedef socklen_t sock_len_t;
 - (int)beginSendFile:(NSString *)path toNick:(NSString *)nick
 {
     struct sockaddr_in sa;
-    socklen_t salen = sizeof(sa);
+    sock_len_t salen = sizeof(sa);
     int flags;
 
     file = fopen([path cString], "rb");
