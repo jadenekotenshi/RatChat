@@ -1,7 +1,9 @@
 #import "AppController.h"
 #import "UIHelpers.h"
 #include <string.h>
+#include <sys/stat.h>
 #include "dcc.h"
+#include "oscompat.h"
 
 static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 
@@ -27,6 +29,8 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     if (!self) return nil;
     sessions = [[NSMutableArray alloc] init];
     dccTransfers = [[NSMutableArray alloc] init];
+    ratchatDir = [[NSHomeDirectory() stringByAppendingPathComponent:@".ratchat"] retain];
+    tlsPinsPath = [[ratchatDir stringByAppendingPathComponent:@"tls_pins"] retain];
     return self;
 }
 
@@ -38,7 +42,25 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [myNick release];
     [namesAccumulator release];
     [dccTransfers release];
+    [ratchatDir release];
+    [tlsPinsPath release];
     [super dealloc];
+}
+
+/* mirrors StepSSH's own -prepareSecurityDirectory: ~/.ratchat, created 0700, holding whatever
+ * per-user state RatChat itself needs to persist (so far, just the TLS pin store). */
+- (void)prepareSecurityDirectory
+{
+    struct stat st;
+    const char *d = [ratchatDir cString];
+    if (stat(d, &st) != 0) mkdir(d, 0700);
+}
+
+- (void)setTLSPinsPath:(NSString *)path
+{
+    if (tlsPinsPath == path) return;
+    [tlsPinsPath release];
+    tlsPinsPath = [path retain];
 }
 
 - (void)setMyNick:(NSString *)n
@@ -102,6 +124,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 {
     NSLog(@"RatChat: applicationDidFinishLaunching");
     SSTrace("applicationDidFinishLaunching");
+    [self prepareSecurityDirectory];
     [self showConnectPanel:nil];
 }
 
@@ -117,7 +140,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 }
 
 - (void)connectController:(ConnectController *)cc didRequestHost:(NSString *)h port:(int)p
-                      nick:(NSString *)n user:(NSString *)u realName:(NSString *)r
+                      nick:(NSString *)n user:(NSString *)u realName:(NSString *)r useTLS:(BOOL)tls
 {
     if (connection) {
         NSRunAlertPanel(@"Already connected", @"Disconnect first before connecting to another server.",
@@ -126,8 +149,8 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     }
     [self setMyNick:n];
     nickRetries = 0;
-    connection = [[IRCConnection alloc] initWithDelegate:self];
-    if (![connection connectToHost:h port:p nick:n user:u realName:r]) {
+    connection = [[IRCConnection alloc] initWithDelegate:self tlsPinsPath:tlsPinsPath];
+    if (![connection connectToHost:h port:p nick:n user:u realName:r useTLS:tls]) {
         [connection release]; connection = nil;
     }
 }

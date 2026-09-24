@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include "tls_pins.h"
 #include "oscompat.h"
 
 #ifndef INADDR_NONE
@@ -33,19 +34,25 @@ typedef socklen_t sock_len_t;
 - (void)pump;
 - (void)flushPending;
 - (void)queueBytes:(const unsigned char *)bytes length:(int)n;
+- (void)feedPlaintext:(const unsigned char *)bytes length:(int)n;
 - (void)handleLine:(const char *)line;
 - (void)endWithMessage:(NSString *)msg;
+- (void)sendRegistration;
+- (void)flushTLSOutput;
+- (BOOL)drainTLSEvents;                       /* returns NO if the connection ended while draining */
+- (void)handleTLSCert:(const tls_event *)ev;
 @end
 
 @implementation IRCConnection
 
-- (id)initWithDelegate:(id)aDelegate
+- (id)initWithDelegate:(id)aDelegate tlsPinsPath:(NSString *)aTlsPinsPath
 {
     self = [super init];
     if (!self) return nil;
     delegate = aDelegate;
     fd = -1;
     state = IRC_DISCONNECTED;
+    tlsPinsPath = [aTlsPinsPath retain];
     return self;
 }
 
@@ -53,7 +60,8 @@ typedef socklen_t sock_len_t;
 {
     [self shutdown];
     if (pendingOut) free(pendingOut);
-    [host release]; [nick release]; [user release]; [realName release];
+    if (tls) tls_free(tls);
+    [host release]; [nick release]; [user release]; [realName release]; [tlsPinsPath release];
     [super dealloc];
 }
 
@@ -70,7 +78,7 @@ typedef socklen_t sock_len_t;
 }
 
 - (BOOL)connectToHost:(NSString *)aHost port:(int)aPort nick:(NSString *)aNick
-                  user:(NSString *)aUser realName:(NSString *)aRealName
+                  user:(NSString *)aUser realName:(NSString *)aRealName useTLS:(BOOL)wantTLS
 {
     struct sockaddr_in sa;
     unsigned long addr;
@@ -82,6 +90,7 @@ typedef socklen_t sock_len_t;
 
     host = [aHost retain]; port = aPort;
     nick = [aNick retain]; user = [aUser retain]; realName = [aRealName retain];
+    useTLS = wantTLS;
     h = [host cString];
 
     memset(&sa, 0, sizeof(sa));
@@ -120,15 +129,116 @@ typedef socklen_t sock_len_t;
 
 - (void)connected
 {
+    if (useTLS) {
+        state = IRC_TLS_HANDSHAKING;
+        tls = tls_new([host cString]);
+        if (!tls || tls_start(tls) != 0) {
+            [self endWithMessage:@"Could not start the TLS handshake"];
+            return;
+        }
+        [self flushTLSOutput];
+        return;
+    }
+    state = IRC_REGISTERING;
+    [self sendRegistration];
+}
+
+- (void)sendRegistration
+{
     char line[IRC_MAX_LINE];
     int n;
 
-    state = IRC_REGISTERING;
     n = irc_fmt_nick(line, sizeof(line), [nick cString]);
-    if (n > 0) [self queueBytes:(const unsigned char *)line length:n];
+    if (n > 0) [self sendCommand:line length:n];
     n = irc_fmt_user(line, sizeof(line), [user cString], [realName cString]);
-    if (n > 0) [self queueBytes:(const unsigned char *)line length:n];
+    if (n > 0) [self sendCommand:line length:n];
+}
+
+/* ---------------------------------------------------------------- */
+/* TLS: everything else in this file stays as-is -- the record layer is
+ * entirely on the far side of tls_input()/tls_output(), so the existing
+ * non-blocking connect/select/recv/send machinery above and the inbuf
+ * line-splitting below never need to know TLS is involved at all. */
+
+- (void)flushTLSOutput
+{
+    const unsigned char *out;
+    size_t outlen;
+    if (!tls) return;
+    out = tls_output(tls, &outlen);
+    if (outlen > 0) {
+        [self queueBytes:out length:(int)outlen];
+        tls_output_done(tls, outlen);
+    }
     [self flushPending];
+}
+
+/* Drains every event tls_input() just produced. Returns NO if the connection ended (a fatal
+ * error, or the peer's close_notify) so the caller can stop touching `self` right away -- the
+ * same shape SSHSession.m's own -processEvents uses for ssh_next_event(). */
+- (BOOL)drainTLSEvents
+{
+    tls_event ev;
+    while (tls_next_event(tls, &ev)) {
+        switch (ev.type) {
+        case TLS_EV_CERT:
+            [self handleTLSCert:&ev];
+            break;
+        case TLS_EV_HANDSHAKE_DONE:
+            state = IRC_REGISTERING;
+            [self sendRegistration];
+            break;
+        case TLS_EV_DATA:
+            [self feedPlaintext:ev.data length:(int)ev.len];
+            if (state == IRC_ENDED) return NO;
+            break;
+        case TLS_EV_ERROR:
+            [self endWithMessage:[NSString stringWithFormat:@"TLS error: %s", ev.text]];
+            return NO;
+        case TLS_EV_CLOSED:
+            [self endWithMessage:@"Connection closed by remote host"];
+            return NO;
+        default:
+            break;
+        }
+        if (state == IRC_ENDED) return NO;
+    }
+    return YES;
+}
+
+/* Mirrors SSHSession.m's own -handleHostKey: exactly: check the pin store first (a MATCH never
+ * prompts at all), differentiate an unseen certificate from a changed one, and only tlspin_add()
+ * on the "Connect"/first-trust path -- a changed certificate is never written back automatically. */
+- (void)handleTLSCert:(const tls_event *)ev
+{
+    NSString *fp = [NSString stringWithCString:ev->text];
+    NSString *cn = [NSString stringWithCString:ev->text2];
+    int r = tlspin_check([tlsPinsPath cString], [host cString], port, ev->data, ev->len);
+    int ans;
+
+    if (r == TLSPIN_MATCH) { tls_cert_accept(tls, 1); return; }
+
+    if (r == TLSPIN_UNKNOWN) {
+        ans = NSRunAlertPanel(@"Unknown certificate",
+            @"The authenticity of host '%@' can't be established.\n\nSubject: %@\nFingerprint: %@\n\n\
+If you trust this host, connect to remember its certificate.",
+            @"Connect", @"Cancel", nil, host, cn, fp);
+        if (ans == NSAlertDefaultReturn) {
+            tlspin_add([tlsPinsPath cString], [host cString], port, ev->data, ev->len);
+            tls_cert_accept(tls, 1);
+        } else {
+            tls_cert_accept(tls, 0);
+        }
+        return;
+    }
+
+    /* TLSPIN_CHANGED: the safe answer is the default button. */
+    ans = NSRunAlertPanel(@"WARNING: CERTIFICATE HAS CHANGED",
+        @"The certificate for '%@' is different from the one saved in %@.\n\n\
+Someone may be eavesdropping on this connection, or the host's certificate was legitimately renewed.\n\n\
+New fingerprint:\n%@",
+        @"Cancel", @"Connect Once", nil, host, tlsPinsPath, fp);
+    tls_cert_accept(tls, ans == NSAlertAlternateReturn ? 1 : 0);
 }
 
 /* ---------------------------------------------------------------- */
@@ -155,7 +265,7 @@ typedef socklen_t sock_len_t;
         } else if ((int)(ticks - connectDeadline) > 0) {
             [self endWithMessage:@"Connection timed out"];
         }
-    } else if (state == IRC_REGISTERING || state == IRC_CONNECTED) {
+    } else if (state == IRC_TLS_HANDSHAKING || state == IRC_REGISTERING || state == IRC_CONNECTED) {
         [self pump];
     }
     inTick = 0;
@@ -167,29 +277,22 @@ typedef socklen_t sock_len_t;
     int i, n;
 
     [self flushPending];
+    if (useTLS) [self flushTLSOutput];
     for (i = 0; i < 8 && state != IRC_ENDED; i++) {
         n = recv(fd, (char *)buf, sizeof(buf), 0);
         if (n > 0) {
-            size_t room = sizeof(inbuf) - inbufLen;
-            size_t take = (size_t)n < room ? (size_t)n : room;
-            char *nl;
-            memcpy(inbuf + inbufLen, buf, take);
-            inbufLen += take;
-            if (take < (size_t)n) {                 /* a line longer than inbuf: drop and resync */
-                SSTrace("IRCConnection: inbound line too long, discarding %u bytes", (unsigned)inbufLen);
-                inbufLen = 0;
-            }
-            while ((nl = (char *)memchr(inbuf, '\n', inbufLen)) != NULL) {
-                char line[IRC_MAX_LINE];
-                size_t lineLen = (size_t)(nl - inbuf);
-                size_t consumed = lineLen + 1;
-                if (lineLen > 0 && inbuf[lineLen - 1] == '\r') lineLen--;
-                if (lineLen >= sizeof(line)) lineLen = sizeof(line) - 1;
-                memcpy(line, inbuf, lineLen);
-                line[lineLen] = '\0';
-                memmove(inbuf, inbuf + consumed, inbufLen - consumed);
-                inbufLen -= consumed;
-                [self handleLine:line];
+            if (useTLS) {
+                if (tls_input(tls, buf, (size_t)n) != 0) {
+                    tls_event ev;
+                    NSString *msg = @"TLS error";
+                    while (tls_next_event(tls, &ev)) if (ev.type == TLS_EV_ERROR) msg = [NSString stringWithFormat:@"TLS error: %s", ev.text];
+                    [self endWithMessage:msg];
+                    return;
+                }
+                if (![self drainTLSEvents]) return;
+                [self flushTLSOutput];
+            } else {
+                [self feedPlaintext:buf length:n];
                 if (state == IRC_ENDED) return;
             }
         } else if (n == 0) {
@@ -203,6 +306,36 @@ typedef socklen_t sock_len_t;
         }
     }
     [self flushPending];
+    if (useTLS) [self flushTLSOutput];
+}
+
+/* The same newline-splitting inbuf this file always had -- now reachable either straight from a
+ * plaintext recv() or from TLS_EV_DATA's decrypted bytes; irc_parse_line never sees anything but
+ * plaintext either way. */
+- (void)feedPlaintext:(const unsigned char *)bytes length:(int)n
+{
+    size_t room = sizeof(inbuf) - inbufLen;
+    size_t take = (size_t)n < room ? (size_t)n : room;
+    char *nl;
+    memcpy(inbuf + inbufLen, bytes, take);
+    inbufLen += take;
+    if (take < (size_t)n) {                         /* a line longer than inbuf: drop and resync */
+        SSTrace("IRCConnection: inbound line too long, discarding %u bytes", (unsigned)inbufLen);
+        inbufLen = 0;
+    }
+    while ((nl = (char *)memchr(inbuf, '\n', inbufLen)) != NULL) {
+        char line[IRC_MAX_LINE];
+        size_t lineLen = (size_t)(nl - inbuf);
+        size_t consumed = lineLen + 1;
+        if (lineLen > 0 && inbuf[lineLen - 1] == '\r') lineLen--;
+        if (lineLen >= sizeof(line)) lineLen = sizeof(line) - 1;
+        memcpy(line, inbuf, lineLen);
+        line[lineLen] = '\0';
+        memmove(inbuf, inbuf + consumed, inbufLen - consumed);
+        inbufLen -= consumed;
+        [self handleLine:line];
+        if (state == IRC_ENDED) return;
+    }
 }
 
 - (void)handleLine:(const char *)line
@@ -214,7 +347,7 @@ typedef socklen_t sock_len_t;
     if (strcmp(msg.command, "PING") == 0) {          /* protocol housekeeping: never forwarded */
         char pong[IRC_MAX_LINE];
         int n = irc_fmt_pong(pong, sizeof(pong), msg.nparams > 0 ? msg.params[0] : "");
-        if (n > 0) [self queueBytes:(const unsigned char *)pong length:n];
+        if (n > 0) [self sendCommand:pong length:n];  /* through TLS when useTLS, same as anything else we send */
         return;
     }
     if (state == IRC_REGISTERING && strcmp(msg.command, "001") == 0) {
@@ -232,8 +365,13 @@ typedef socklen_t sock_len_t;
 - (void)sendCommand:(const char *)line length:(int)len
 {
     if (state != IRC_REGISTERING && state != IRC_CONNECTED) return;
-    [self queueBytes:(const unsigned char *)line length:len];
-    [self flushPending];
+    if (useTLS) {
+        if (tls_write(tls, (const unsigned char *)line, (size_t)len) != 0) return;
+        [self flushTLSOutput];
+    } else {
+        [self queueBytes:(const unsigned char *)line length:len];
+        [self flushPending];
+    }
 }
 
 - (void)queueBytes:(const unsigned char *)bytes length:(int)n
@@ -282,7 +420,7 @@ typedef socklen_t sock_len_t;
     if (state == IRC_REGISTERING || state == IRC_CONNECTED) {
         char line[IRC_MAX_LINE];
         int n = irc_fmt_quit(line, sizeof(line), reason ? [reason cString] : NULL);
-        if (n > 0) { [self queueBytes:(const unsigned char *)line length:n]; [self flushPending]; }
+        if (n > 0) [self sendCommand:line length:n];
     }
     [self endWithMessage:nil];
 }

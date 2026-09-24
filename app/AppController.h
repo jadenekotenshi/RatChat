@@ -19,6 +19,12 @@
     int                 nickRetries;          /* auto-"_"-suffix retries on ERR_NICKNAMEINUSE */
     NSMutableDictionary *namesAccumulator;    /* channel name -> NSMutableArray of nicks, mid-353/366 */
     NSMutableArray      *dccTransfers;        /* every active DCCTransfer, send or receive */
+    NSString            *ratchatDir;          /* ~/.ratchat, mirrors StepSSH's own ~/.ssh */
+    NSString            *tlsPinsPath;         /* ~/.ratchat/tls_pins -- TOFU certificate pins */
 }
 - (void)buildMenu;
+/* Overrides where TOFU certificate pins are read/written -- ~/.ratchat/tls_pins by default. Only
+ * needed by tests, which pre-seed a pin so a headless run never hits the (necessarily modal)
+ * TLS_EV_CERT trust dialog. */
+- (void)setTLSPinsPath:(NSString *)path;
 @end

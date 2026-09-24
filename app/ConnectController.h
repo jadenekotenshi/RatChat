@@ -8,6 +8,7 @@
     id       owner;
     NSPanel *panel;
     NSTextField *hostField, *portField, *nickField, *userField, *realNameField;
+    NSButton *tlsSwitch;
 }
 - (id)initWithOwner:(id)anOwner;
 - (void)showPanel;
@@ -15,5 +16,6 @@
 
 @interface NSObject (ConnectControllerOwner)
 - (void)connectController:(ConnectController *)cc didRequestHost:(NSString *)host port:(int)port
-                      nick:(NSString *)nick user:(NSString *)user realName:(NSString *)realName;
+                      nick:(NSString *)nick user:(NSString *)user realName:(NSString *)realName
+                    useTLS:(BOOL)useTLS;
 @end

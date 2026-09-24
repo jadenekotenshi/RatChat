@@ -4,6 +4,7 @@
 /* gcc 2.7.2 does not look ahead within an @implementation. */
 @interface ConnectController (Private)
 - (void)buildPanel;
+- (void)toggleTLS:(id)sender;
 @end
 
 @implementation ConnectController
@@ -59,6 +60,11 @@
     [realNameField setStringValue:NSUserName()];
     [c addSubview:realNameField];
 
+    tlsSwitch = ui_switch(@"Use TLS", NSMakeRect(100, 68, 150, 22));
+    [tlsSwitch setTarget:self];
+    [tlsSwitch setAction:@selector(toggleTLS:)];
+    [c addSubview:tlsSwitch];
+
     connectBtn = [[[NSButton alloc] initWithFrame:NSMakeRect(328, 16, 78, 30)] autorelease];
     [connectBtn setTitle:@"Connect"];
     [connectBtn setTarget:self];
@@ -75,7 +81,8 @@
     [portField setNextKeyView:nickField];
     [nickField setNextKeyView:userField];
     [userField setNextKeyView:realNameField];
-    [realNameField setNextKeyView:hostField];
+    [realNameField setNextKeyView:tlsSwitch];
+    [tlsSwitch setNextKeyView:hostField];
     [panel setInitialFirstResponder:hostField];
     [panel center];
 }
@@ -89,6 +96,19 @@
 
 - (void)cancel:(id)sender { [panel orderOut:nil]; }
 
+/* Only ever nudges the port field between the two conventional defaults, and only when it still
+ * shows whichever default the *other* state would have set -- a port the user typed themselves
+ * is left alone. */
+- (void)toggleTLS:(id)sender
+{
+    NSString *cur = [portField stringValue];
+    if ([tlsSwitch state] == NSOnState) {
+        if ([cur isEqualToString:@"6667"]) [portField setStringValue:@"6697"];
+    } else {
+        if ([cur isEqualToString:@"6697"]) [portField setStringValue:@"6667"];
+    }
+}
+
 - (void)connect:(id)sender
 {
     NSString *h = ui_trim([hostField stringValue]);
@@ -96,6 +116,7 @@
     NSString *u = ui_trim([userField stringValue]);
     NSString *r = ui_trim([realNameField stringValue]);
     int p = [[portField stringValue] intValue];
+    BOOL useTLS = [tlsSwitch state] == NSOnState;
 
     if ([h length] == 0 || [nk length] == 0) {
         NSRunAlertPanel(@"Missing information", @"Enter a server and a nickname.", @"OK", nil, nil);
@@ -109,8 +130,8 @@
     if ([r length] == 0) r = nk;
 
     [panel orderOut:nil];
-    if ([owner respondsToSelector:@selector(connectController:didRequestHost:port:nick:user:realName:)])
-        [owner connectController:self didRequestHost:h port:p nick:nk user:u realName:r];
+    if ([owner respondsToSelector:@selector(connectController:didRequestHost:port:nick:user:realName:useTLS:)])
+        [owner connectController:self didRequestHost:h port:p nick:nk user:u realName:r useTLS:useTLS];
 }
 
 @end

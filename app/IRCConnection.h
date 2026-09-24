@@ -1,5 +1,6 @@
 #import "Compat.h"
 #include "irc_parse.h"
+#include "tls.h"
 
 /* One raw TCP connection to one IRC server -- mirrors SSHSession's own socket handling closely on
  * purpose (the same non-blocking connect/select/recv/send pattern, the same 20ms NSTimer poll
@@ -11,7 +12,7 @@
  * one IRCConnection for the app's one server connection (see AskUserQuestion: "single server,
  * multiple channel windows" was the chosen scope). */
 
-enum { IRC_DISCONNECTED, IRC_CONNECTING, IRC_REGISTERING, IRC_CONNECTED, IRC_ENDED };
+enum { IRC_DISCONNECTED, IRC_CONNECTING, IRC_TLS_HANDSHAKING, IRC_REGISTERING, IRC_CONNECTED, IRC_ENDED };
 
 @interface IRCConnection : NSObject
 {
@@ -33,10 +34,14 @@ enum { IRC_DISCONNECTED, IRC_CONNECTING, IRC_REGISTERING, IRC_CONNECTED, IRC_END
     NSString *nick;                  /* requested nick; may differ from the server's actual grant */
     NSString *user;
     NSString *realName;
+
+    BOOL          useTLS;
+    tls_session  *tls;
+    NSString     *tlsPinsPath;
 }
-- (id)initWithDelegate:(id)aDelegate;
+- (id)initWithDelegate:(id)aDelegate tlsPinsPath:(NSString *)aTlsPinsPath;
 - (BOOL)connectToHost:(NSString *)aHost port:(int)aPort nick:(NSString *)aNick
-                  user:(NSString *)aUser realName:(NSString *)aRealName;
+                  user:(NSString *)aUser realName:(NSString *)aRealName useTLS:(BOOL)wantTLS;
 - (void)sendCommand:(const char *)line length:(int)len;      /* pre-formatted, already has \r\n */
 - (BOOL)isConnected;
 - (NSString *)host;

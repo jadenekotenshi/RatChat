@@ -186,7 +186,7 @@ int main(void)
 
     ac = [[AppController alloc] init];
     [ac connectController:nil didRequestHost:@"127.0.0.1" port:port nick:@"ratty" user:@"ratty"
-                  realName:@"Rat Chat User"];
+                  realName:@"Rat Chat User" useTLS:NO];
     EXPECT(fs_accept(&fs, 5.0), "the fake server accepts a real, non-blocking connect from IRCConnection");
 
     EXPECT(fs_expect(&fs, @"NICK ratty", 5.0), "registration sends NICK");

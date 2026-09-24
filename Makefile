@@ -150,4 +150,21 @@ tls-smoke:
 	$(CC) -w -g -Icore tests/tls_smoke.c core/*.c -o build/tls_smoke
 	build/tls_smoke
 
-.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke clean
+# The same real-server technique as tls-smoke, but through the actual app-layer wiring
+# (IRCConnection's useTLS path, AppController's TLS pin store) instead of core/tls.c directly --
+# a pre-seeded pin (the same SHA-256 core/tls_pins.c itself would compute) lets it run headless,
+# since the real TLS_EV_CERT trust dialog is a genuinely modal NSRunAlertPanel otherwise.
+irc-tls-smoke:
+	mkdir -p build
+	openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj "/CN=localhost" \
+	    -keyout build/irc_tls_smoke.key -out build/irc_tls_smoke.pem 2>/dev/null
+	fp=$$(openssl x509 -in build/irc_tls_smoke.pem -outform DER | openssl dgst -sha256 -r | awk '{print $$1}'); \
+	    printf "127.0.0.1 15901 %s\n" "$$fp" > build/irc_tls_pins.txt
+	for f in tests/irc_tls_smoke.m $(UI_SRC); do \
+	  $(CC) -c -x objective-c -fno-objc-arc -w -g -Iterm -Iapp -Icore $$f -o build/its_$$(basename $$f .m).o || exit 1; \
+	done
+	for f in term/*.c core/*.c; do $(CC) -c -w -g -Iterm -Icore $$f -o build/its_c_$$(basename $$f .c).o || exit 1; done
+	$(CC) build/its_*.o -framework Cocoa -o build/irc_tls_smoke
+	build/irc_tls_smoke 15901 build/irc_tls_smoke.pem build/irc_tls_smoke.key build/irc_tls_pins.txt
+
+.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke irc-tls-smoke clean
