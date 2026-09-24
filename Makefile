@@ -61,9 +61,13 @@ $(BUILD)/test_tls_aead: tests/test_tls_aead.c $(CORE_OBJ)
 $(BUILD)/test_tls: tests/test_tls.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_tls.c $(CORE_OBJ) -o $@
 
+$(BUILD)/test_tls_pins: tests/test_tls_pins.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_tls_pins.c $(CORE_OBJ) -o $@
+
 test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
       $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa $(BUILD)/test_der \
-      $(BUILD)/test_x509 $(BUILD)/test_tls_wire $(BUILD)/test_tls_prf $(BUILD)/test_tls_aead $(BUILD)/test_tls
+      $(BUILD)/test_x509 $(BUILD)/test_tls_wire $(BUILD)/test_tls_prf $(BUILD)/test_tls_aead $(BUILD)/test_tls \
+      $(BUILD)/test_tls_pins
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
 	$(BUILD)/test_dcc
@@ -77,6 +81,7 @@ test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
 	$(BUILD)/test_tls_prf
 	$(BUILD)/test_tls_aead
 	$(BUILD)/test_tls
+	$(BUILD)/test_tls_pins
 
 lint:
 	sh tools/lint_openstep.sh
