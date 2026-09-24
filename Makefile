@@ -58,9 +58,12 @@ $(BUILD)/test_tls_prf: tests/test_tls_prf.c $(CORE_OBJ)
 $(BUILD)/test_tls_aead: tests/test_tls_aead.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_tls_aead.c $(CORE_OBJ) -o $@
 
+$(BUILD)/test_tls: tests/test_tls.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_tls.c $(CORE_OBJ) -o $@
+
 test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
       $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa $(BUILD)/test_der \
-      $(BUILD)/test_x509 $(BUILD)/test_tls_wire $(BUILD)/test_tls_prf $(BUILD)/test_tls_aead
+      $(BUILD)/test_x509 $(BUILD)/test_tls_wire $(BUILD)/test_tls_prf $(BUILD)/test_tls_aead $(BUILD)/test_tls
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
 	$(BUILD)/test_dcc
@@ -73,6 +76,7 @@ test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
 	$(BUILD)/test_tls_wire
 	$(BUILD)/test_tls_prf
 	$(BUILD)/test_tls_aead
+	$(BUILD)/test_tls
 
 lint:
 	sh tools/lint_openstep.sh
@@ -130,4 +134,15 @@ dcc-smoke:
 clean:
 	rm -rf build
 
-.PHONY: all test lint check-objc dist irc-smoke dcc-smoke clean
+# Drives a real tls_session, as a real TCP client, through a full TLS 1.2 handshake against a
+# REAL local `openssl s_server` (a temporary self-signed cert generated fresh each run) -- see
+# the test file's own header for why this stands in for a byte-for-byte replay of a captured
+# real handshake, which turns out not to be achievable with ordinary OpenSSL tooling.
+tls-smoke:
+	mkdir -p build
+	openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj "/CN=localhost" \
+	    -keyout build/tls_smoke.key -out build/tls_smoke.pem 2>/dev/null
+	$(CC) -w -g -Icore tests/tls_smoke.c core/*.c -o build/tls_smoke
+	build/tls_smoke
+
+.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke clean
