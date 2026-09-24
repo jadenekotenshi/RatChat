@@ -49,11 +49,26 @@ connection's own local endpoint reports, which works on a LAN or a direct connec
 through most home routers' NAT without port forwarding. Also skips the old per-chunk 4-byte-ack
 convention some DCC implementations use for flow control, since TCP already provides that.
 
-**Not built yet**: TLS/SSL (plaintext only, and a real undertaking on this platform -- OPENSTEP
-4.2 has nothing to build on, so it would mean a from-scratch implementation on the scale of
-StepSSH's own SSH crypto), DCC CHAT (direct chat bypassing the server -- only DCC SEND, file
-transfer, is built), saved server profiles, and any of the fancier IRCv3 capabilities (SASL,
-message tags, etc.).
+**TLS** (`core/tls.c` and friends, `app/IRCConnection.m`'s `useTLS` path): a "Use TLS" switch in
+the connect panel (toggling the port field's own default between `6667`/`6697`) gets a real,
+from-scratch TLS 1.2 client -- OPENSTEP 4.2 has nothing to build on, so this is genuinely a
+from-scratch implementation on roughly the scale of StepSSH's own SSH crypto, built on top of
+crypto primitives vendored in from there (SHA-2, HMAC, bignum, ECDSA/ECDH, RSA verification,
+AES, ChaCha20-Poly1305, all already hardware-confirmed via StepSSH's own shipped product).
+Deliberately narrow scope, matching real networks' actual requirements rather than the whole of
+what TLS 1.2 can do: ECDHE key exchange only (X25519 preferred, P-256 fallback), AEAD cipher
+suites only -- `ECDHE-{RSA,ECDSA}-AES128-GCM-SHA256` and the two ChaCha20-Poly1305 equivalents --
+no CBC suites, no renegotiation, no session resumption, no client certificates, and no TLS 1.3.
+Trust is TOFU (trust-on-first-use) pinning of the whole leaf certificate's DER, by SHA-256, in a
+new `~/.ratchat/tls_pins` -- mirrors StepSSH's own `~/.ssh/known_hosts` model for SSH host keys
+exactly (same underlying question: "is this the same server identity I trusted before," not "is
+this transitively trusted by a CA"), including the same unknown/changed distinction and trust
+dialog shape. No CA chain validation, no revocation checking, no hostname-vs-SubjectAltName
+matching at all.
+
+**Not built yet**: DCC CHAT (direct chat bypassing the server -- only DCC SEND, file transfer, is
+built), saved server profiles, and any of the fancier IRCv3 capabilities (SASL, message tags,
+etc.).
 
 ## What was verified, and what was not
 
@@ -61,8 +76,27 @@ message tags, etc.).
 - `make test` -- `term/vt.c`'s own 259 checks (copied from StepTTY, unmodified, still passing:
   no RatChat-specific coupling in the terminal emulator itself), 94 checks for `core/irc_parse.c`
   (prefix/command/param parsing, trailing-param edge cases, CTCP, and every outgoing command
-  formatter), and 30 checks for `core/dcc.c` (DCC SEND request parsing including quoted filenames,
-  the classic decimal IP encoding both ways, and every formatter, all round-tripped).
+  formatter), 30 checks for `core/dcc.c` (DCC SEND request parsing including quoted filenames,
+  the classic decimal IP encoding both ways, and every formatter, all round-tripped), and just
+  over 3000 more across every TLS-related module: the vendored crypto primitives against
+  StepSSH's own already-hardware-confirmed results; `core/der.c`/`core/x509.c` against three real
+  openssl-generated certificates (RSA-2048, EC-P256, EC-P384), every value cross-checked
+  independently via openssl's own tools, plus full truncation/corruption sweeps; `core/tls_prf.c`
+  against a real captured local TLS 1.2 handshake's actual derived keys; `core/tls_aead_gcm.c`/
+  `tls_aead_chacha.c` against RFC 8439's own published vector and four real captured TLS records,
+  independently decrypted by linked OpenSSL before being trusted as vectors; `core/tls.c` itself
+  against hand-built record/handshake-message reassembly at every possible split point, and
+  `core/tls_pins.c` against the same unknown/match/changed/append-only model `core/knownhosts.c`
+  already established for SSH host keys.
+- `make tls-smoke` -- drives a real `tls_session`, as a real TCP client, through a complete TLS
+  1.2 handshake against a real local `openssl s_server` (spawned by the test itself), for both
+  `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-RSA-CHACHA20-POLY1305`; confirms the independently
+  derived `master_secret` matches OpenSSL's own `-keylogfile` output bit-for-bit. 10 checks.
+- `make irc-tls-smoke` -- the same idea at the app layer: a real `AppController`/`IRCConnection`
+  stack, TLS turned on, against a real local `openssl s_server`, with a pre-seeded TOFU pin so
+  the (genuinely modal) trust dialog never needs a click. Confirms `NICK`/`USER` actually reach
+  the real server decrypted correctly, and that a scripted server response decrypts correctly and
+  completes registration. 4 checks.
 - `make irc-smoke` -- drives a *real* `AppController`/`IRCConnection`/`IRCChannelSession` stack
   against a scripted fake IRC server (a real TCP listener on `127.0.0.1`, not a mock): a real
   non-blocking `connect()`, real `NICK`/`USER` registration, `/join` opening a channel window on
@@ -75,7 +109,9 @@ message tags, etc.).
   reaching the real socket *and* echoing locally, Tab-completion and Up-arrow history recall driven
   through the same `-control:textView:doCommandBySelector:` call AppKit itself would make for a
   real Tab/Up keypress in the input field (not the higher-level "line already submitted" shortcut
-  most other checks use), `/me`, `/nick`, and `/quit`/disconnect. 32 checks, all passing.
+  most other checks use), `/me`, `/nick`, and `/quit`/disconnect. 32 checks, all passing --
+  unaffected by TLS's own arrival, since `IRCConnection.m`'s plaintext path and its TLS path
+  share the same line-splitting and backpressure code underneath.
 - `make dcc-smoke` -- drives two real `DCCTransfer` instances (one sending, one receiving) against
   each other over a real `127.0.0.1` connection: a real listen/accept and a real non-blocking
   connect, a 200KB file (well over one 8KB read/write chunk, so several send()/recv() rounds are
@@ -100,21 +136,36 @@ thing.
 
 **Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
 StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
-timestamps, CTCP auto-replies, and DCC file transfer. `NSCalendarDate` (timestamps, the CTCP
-`TIME` reply) is standard OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on
-throughout this whole family of projects' poll loops), has not been exercised on real OPENSTEP
-hardware by any of these projects before -- worth checking first if anything looks off there
-specifically. DCC's own socket code is the same already-proven non-blocking connect/select/
-recv/send pattern as `IRCConnection`, plus a plain `listen()`/`accept()` for the sending side
-(also standard BSD sockets, no reason to expect trouble, but genuinely new to this codebase);
-`NSSavePanel` (used to choose where to save an incoming file) is confirmed working in StepSSH.
+timestamps, CTCP auto-replies, DCC file transfer, and **all of TLS**. `NSCalendarDate`
+(timestamps, the CTCP `TIME` reply, and now the TLS trust dialog's not-yet-valid/expired
+warning) is standard OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout
+this whole family of projects' poll loops), has not been exercised on real OPENSTEP hardware by
+any of these projects before -- worth checking first if anything looks off there specifically.
+DCC's own socket code is the same already-proven non-blocking connect/select/recv/send pattern
+as `IRCConnection`, plus a plain `listen()`/`accept()` for the sending side (also standard BSD
+sockets, no reason to expect trouble, but genuinely new to this codebase); `NSSavePanel` (used
+to choose where to save an incoming file) is confirmed working in StepSSH.
+
+TLS specifically: every crypto primitive, every protocol-parsing/framing piece, and the full
+handshake state machine have all been tested extremely thoroughly on the host (see above) --
+including full round trips against real, independent OpenSSL, both at the raw engine level
+(`make tls-smoke`) and through the actual app wiring (`make irc-tls-smoke`) -- but *nothing*
+TLS-related has yet run on gcc 2.7.2 or on real i386/m68k hardware. The two specific real-hardware
+unknowns worth watching for, beyond "does it work at all": whether the pure-C89 crypto code's
+performance is acceptable on real period hardware for a handshake against a real public server
+(none of StepSSH's own crypto primitives were performance-profiled on real hardware either, just
+confirmed correct), and whether real public IRC networks' actual TLS configurations (certificate
+key types, negotiated cipher suite, any capability quirks) land inside this client's
+deliberately narrow scope -- `irc.libera.chat:6697` is the natural first real-network target.
 
 ## Building
 
 ```sh
-make test        # FIRST: the terminal emulator core + IRC/DCC protocol parsing, on the dev host
-make irc-smoke    # a real socket/connection/window session, end to end, against a fake server
-make dcc-smoke    # a real file transfer, end to end, between two DCCTransfer instances
+make test          # FIRST: the terminal emulator core + IRC/DCC/TLS protocol parsing+crypto, on the dev host
+make irc-smoke      # a real socket/connection/window session, end to end, against a fake server
+make dcc-smoke      # a real file transfer, end to end, between two DCCTransfer instances
+make tls-smoke      # a real TLS 1.2 handshake, end to end, against a real local openssl s_server
+make irc-tls-smoke  # the same, but through the actual app-layer TLS wiring
 make lint check-objc     # style/portability checks
 ```
 
@@ -151,7 +202,11 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
 - `app/IRCConnection.m`/`.h` -- new. Owns the one raw TCP socket, mirroring `SSHSession.m`'s
   non-blocking connect/select/recv/send pattern and 20&nbsp;ms poll loop closely on purpose (already
   proven reliable on real OPENSTEP hardware there), plus its own inbound line-buffering (IRC has no
-  protocol engine to lean on for this the way SSH does) and outbound backpressure queue.
+  protocol engine to lean on for this the way SSH does) and outbound backpressure queue. When
+  `useTLS` is set, `core/tls.c`'s engine sits between the raw socket and that same line-buffering/
+  backpressure code -- `recv()`/`send()` themselves are completely unchanged, only what feeds them
+  differs. The `TLS_EV_CERT` trust dialog reuses `SSHSession.m`'s own `-handleHostKey:` pattern
+  exactly (a synchronous `NSRunAlertPanel`, backed by a TOFU pin store).
 - `app/IRCChannelSession.m`/`.h` -- new. One window per channel, query, or the server status;
   mirrors `PTYSession`/`SSHSession` closely (owns its window and `TerminalView`, is the window's
   own close delegate). Unlike either of those, input lives in its own single-line `NSTextField`
@@ -164,10 +219,47 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
 - `app/AppController.m`/`.h` -- new. Owns the app's one `IRCConnection` and every open
   `IRCChannelSession`; is the connection's delegate (the central router deciding which window a
   parsed message belongs to, and formatting it for display) and each session's owner (dispatching
-  submitted lines as either a slash command or a plain `PRIVMSG`).
+  submitted lines as either a slash command or a plain `PRIVMSG`). Also creates `~/.ratchat`
+  (mode&nbsp;0700) at launch to hold `tls_pins`, the TOFU pin store `core/tls_pins.c` reads and
+  writes.
 - `app/ConnectController.m`/`.h` -- new. A small server/port/nick/username/real-name panel,
   shaped like StepSSH's own connect panel but trimmed to what an unauthenticated IRC connection
-  actually needs.
+  actually needs, plus a "Use TLS" switch that flips the port field's default between 6667 and
+  6697.
+- `core/tls.c`/`.h`+`tls_priv.h` -- new. A sans-I/O TLS&nbsp;1.2 client handshake/record engine,
+  shaped identically to `ssh.h`/`ssh_priv.h` on purpose (`tls_new`/`free`/`start`/`input`/`output`/
+  `output_done`/`next_event`/`write`/`is_closed`, the same event-queue pattern) -- it never touches
+  a socket itself, `IRCConnection` owns all of the actual `recv()`/`send()`. ECDHE-only, AEAD-only:
+  `TLS_ECDHE_{RSA,ECDSA}_WITH_AES_128_GCM_SHA256` and the ChaCha20-Poly1305 equivalents, X25519
+  preferred over P-256. No CBC, no renegotiation, no session resumption, no TLS&nbsp;1.3. Handles
+  two independent framing layers (5-byte record headers, and 4-byte handshake-message headers
+  inside the decrypted record stream), each reassembled independently of how the caller's TCP reads
+  happen to chop the bytes up.
+- `core/tls_wire.c`/`.h` -- new. Length-prefixed vector helpers for TLS's own wire format, built on
+  top of the untouched vendored `wire.c`'s `sbuf`/`sreader` rather than editing `wire.c` itself
+  (keeps it byte-diffable against StepSSH's original). `core/tls_prf.c`/`.h` -- new. RFC&nbsp;5246
+  §5's `P_hash`/PRF (fixed to SHA-256 for every suite this client offers), a pure composition on top
+  of vendored `hmac.c`.
+- `core/tls_aead_gcm.c`/`.h`, `core/tls_aead_chacha.c`/`.h` -- new. Two independent AEAD wrappers:
+  GCM's own GHASH/counter-mode framing on top of vendored `aes.c`'s block primitive (TLS's GCM
+  nonce is the 4-byte fixed IV concatenated with, not XOR'd with, an 8-byte explicit per-record
+  nonce -- distinct from ChaCha20-Poly1305's implicit-nonce-via-XOR scheme), and the RFC&nbsp;8439
+  IETF ChaCha20-Poly1305 construction on top of vendored `chacha.c`'s raw primitives (a single
+  32-byte key, distinct from `chacha.c`'s own `chachapoly_*` OpenSSH split-key scheme, which stays
+  unused here).
+- `core/der.c`/`.h` -- new. A small DER/ASN.1 reader (nested SEQUENCEs, short/long-form lengths,
+  BIT STRING, OID comparison, UTCTime/GeneralizedTime, a DER `SEQUENCE{INTEGER r, INTEGER s}`
+  decoder for ECDSA signatures), modeled on `ssh_key.c`'s own file-local DER helpers but built out
+  further since X.509 needs more structure than an SSH private-key file does.
+- `core/x509.c`/`.h` -- new. Parses exactly as much of one leaf certificate as the TOFU trust model
+  above needs: validity dates, subject CN (display only), and the SubjectPublicKeyInfo (RSA or EC)
+  used to verify the handshake's ServerKeyExchange signature -- no chain walking, no issuer
+  signature verification, no revocation checking.
+- `core/tls_pins.c`/`.h` -- new. TOFU certificate pinning, mirroring `core/knownhosts.c`'s own
+  shape exactly (`kh_check`/`add` &rarr; `tlspin_check`/`add`, `KH_UNKNOWN`/`MATCH`/`CHANGED`
+  &rarr; `TLSPIN_*`) but pinning the whole leaf certificate's DER SHA-256 per host:port rather than
+  just a public key. Append-only by design: an old accepted certificate stays a valid match
+  forever, even after a newer one is pinned for the same host.
 - `core/dcc.c`/`.h` -- new. Pure C89, no I/O: parses/formats the CTCP `DCC SEND` request (including
   quoted filenames) and the classic decimal-encoded IPv4 address DCC uses instead of a dotted
   quad. `app/DCCTransfer.m`/`.h` -- new. One direct peer-to-peer file transfer, entirely separate
