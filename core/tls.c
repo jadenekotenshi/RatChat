@@ -440,18 +440,38 @@ static int handle_server_key_exchange(tls_session *s, const u8 *body, size_t len
     return 0;
 }
 
-/* ServerHelloDone triggers our entire response flight in one go: ClientKeyExchange (still in the
- * clear), ChangeCipherSpec (always in the clear; flips tx to encrypted immediately after), then
- * Finished -- genuinely the first record encrypted under the new keys, not just labeled as such. */
+/* Optional, and common on real networks that support TLS client-certificate ("CertFP") login --
+ * IRC servers send this unconditionally to offer the option, whether or not the client intends to
+ * use it. RatChat never presents a client certificate (an explicit non-goal), but RFC 5246 SS7.4.6
+ * still requires *some* reply: an empty Certificate message, sent from handle_server_hello_done
+ * once ServerHelloDone actually arrives. We never even look at the requested certificate types or
+ * CA list here, since our answer never depends on them. */
+static int handle_certificate_request(tls_session *s, const u8 *body, size_t len)
+{
+    if (s->state != TLS_ST_WAIT_SHD) { tls_fail(s, "unexpected CertificateRequest"); return -1; }
+    (void)body; (void)len;
+    s->got_cert_request = 1;
+    return 0;
+}
+
+/* ServerHelloDone triggers our entire response flight in one go: an empty Certificate first if
+ * the server sent a CertificateRequest, ClientKeyExchange (still in the clear), ChangeCipherSpec
+ * (always in the clear; flips tx to encrypted immediately after), then Finished -- genuinely the
+ * first record encrypted under the new keys, not just labeled as such. */
 static int handle_server_hello_done(tls_session *s, const u8 *body, size_t len)
 {
     u8 ckx_body[134];
     u8 hash[32], verify_data[12];
     u8 ccs = 1;
+    static const u8 empty_cert_list[3] = { 0, 0, 0 };
 
     if (s->state != TLS_ST_WAIT_SHD) { tls_fail(s, "unexpected ServerHelloDone"); return -1; }
     if (len != 0) { tls_fail(s, "malformed ServerHelloDone"); return -1; }
     (void)body;
+
+    if (s->got_cert_request) {
+        if (send_handshake(s, HS_CERTIFICATE, empty_cert_list, 3) != 0) return -1;
+    }
 
     ckx_body[0] = (u8)s->ckx_point_len;
     memcpy(ckx_body + 1, s->ckx_point, s->ckx_point_len);
@@ -513,6 +533,7 @@ static int drain_handshake(tls_session *s)
         case HS_SERVER_HELLO:        rc = handle_server_hello(s, body, body_len); break;
         case HS_CERTIFICATE:         rc = handle_certificate(s, body, body_len); break;
         case HS_SERVER_KEY_EXCHANGE: rc = handle_server_key_exchange(s, body, body_len); break;
+        case HS_CERTIFICATE_REQUEST: rc = handle_certificate_request(s, body, body_len); break;
         case HS_SERVER_HELLO_DONE:   rc = handle_server_hello_done(s, body, body_len); break;
         case HS_FINISHED:            rc = handle_finished(s, body, body_len); break;
         default: tls_fail(s, "unexpected handshake message type"); rc = -1; break;

@@ -25,7 +25,8 @@ enum { CT_CHANGE_CIPHER_SPEC = 20, CT_ALERT = 21, CT_HANDSHAKE = 22, CT_APPLICAT
 
 enum {
     HS_CLIENT_HELLO = 1, HS_SERVER_HELLO = 2, HS_CERTIFICATE = 11, HS_SERVER_KEY_EXCHANGE = 12,
-    HS_SERVER_HELLO_DONE = 14, HS_CLIENT_KEY_EXCHANGE = 16, HS_FINISHED = 20
+    HS_CERTIFICATE_REQUEST = 13, HS_SERVER_HELLO_DONE = 14, HS_CLIENT_KEY_EXCHANGE = 16,
+    HS_FINISHED = 20
 };
 
 enum { AEAD_GCM = 1, AEAD_CHACHA = 2 };
@@ -86,6 +87,8 @@ struct tls_session {
 
     x509_cert cert;
     int cert_decided, cert_ok;
+    int got_cert_request;         /* server sent CertificateRequest; we never have one to offer, but
+                                    * RFC 5246 SS7.4.6 still requires an empty Certificate reply */
 
     u8 master_secret[48];
     tls_dir tx, rx;

@@ -83,20 +83,24 @@ etc.).
   (prefix/command/param parsing, trailing-param edge cases, CTCP, and every outgoing command
   formatter), 30 checks for `core/dcc.c` (DCC SEND request parsing including quoted filenames,
   the classic decimal IP encoding both ways, and every formatter, all round-tripped), and just
-  over 3000 more across every TLS-related module: the vendored crypto primitives against
+  over 3400 more across every TLS-related module: the vendored crypto primitives against
   StepSSH's own already-hardware-confirmed results; `core/der.c`/`core/x509.c` against three real
   openssl-generated certificates (RSA-2048, EC-P256, EC-P384), every value cross-checked
   independently via openssl's own tools, plus full truncation/corruption sweeps; `core/tls_prf.c`
   against a real captured local TLS 1.2 handshake's actual derived keys; `core/tls_aead_gcm.c`/
   `tls_aead_chacha.c` against RFC 8439's own published vector and four real captured TLS records,
   independently decrypted by linked OpenSSL before being trusted as vectors; `core/tls.c` itself
-  against hand-built record/handshake-message reassembly at every possible split point, and
-  `core/tls_pins.c` against the same unknown/match/changed/append-only model `core/knownhosts.c`
-  already established for SSH host keys.
+  against hand-built record/handshake-message reassembly at every possible split point (including
+  a real network's own `CertificateRequest` -- see below), and `core/tls_pins.c` against the same
+  unknown/match/changed/append-only model `core/knownhosts.c` already established for SSH host
+  keys.
 - `make tls-smoke` -- drives a real `tls_session`, as a real TCP client, through a complete TLS
   1.2 handshake against a real local `openssl s_server` (spawned by the test itself), for both
-  `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-RSA-CHACHA20-POLY1305`; confirms the independently
-  derived `master_secret` matches OpenSSL's own `-keylogfile` output bit-for-bit. 10 checks.
+  `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-RSA-CHACHA20-POLY1305`, plus a third round
+  (`openssl s_server -verify 1`) reproducing real IRC networks' habit of sending
+  `CertificateRequest` unconditionally to offer optional TLS client-certificate login; confirms the
+  independently derived `master_secret` matches OpenSSL's own `-keylogfile` output bit-for-bit each
+  time, and that the `CertificateRequest` round actually exercised the new code path. 18 checks.
 - `make irc-tls-smoke` -- the same idea at the app layer: a real `AppController`/`IRCConnection`
   stack, TLS turned on, against a real local `openssl s_server`, with a pre-seeded TOFU pin so
   the (genuinely modal) trust dialog never needs a click. Confirms `NICK`/`USER` actually reach
@@ -176,12 +180,33 @@ on the real thing -- `check-objc`/`make test` on the dev Mac couldn't have caugh
 OPENSTEP 4.2 headers never declared (modern AppKit still ships it as a deprecated-but-present
 alias); `DCCTransfer.m` used a raw `socklen_t` at one call site instead of the file's own
 OPENSTEP-gated `sock_len_t` typedef (POSIX.1g, 1998 -- newer than OPENSTEP 4.2's own headers);
-and, the substantial one, RatChat's app layer never seeded `core/rng.c` at all, so a TLS
-connection's `tls_start()` correctly failed fast with "not enough entropy" the moment real
-hardware (with no `/dev/urandom`) actually needed real randomness -- fixed by porting StepSSH's
-own entropy-seeding panel over (see "What it does" above and `make entropy-gate-smoke`). As of
-this writing TLS has not yet completed a full connection on real hardware; these were build- and
-launch-time blockers on the way there, not a final confirmation.
+RatChat's app layer never seeded `core/rng.c` at all, so a TLS connection's `tls_start()`
+correctly failed fast with "not enough entropy" the moment real hardware (with no `/dev/urandom`)
+actually needed real randomness -- fixed by porting StepSSH's own entropy-seeding panel over (see
+"What it does" above and `make entropy-gate-smoke`); and the new entropy panel's own label text
+was split across two lines relying on implicit adjacent string-literal concatenation between an
+`@"..."` and a plain `"..."`, which real gcc 2.7.2 does not reliably accept (`tools/
+check_string_concat.py`, now in `make lint`, catches this class going forward).
+
+A fifth bug was a real protocol gap, not a portability issue -- reproducible on the dev Mac too,
+once tested against a real network rather than a local `openssl s_server`: real IRC networks
+(confirmed against `irc.libera.chat`) send `CertificateRequest` unconditionally during the
+handshake, to offer optional TLS client-certificate ("CertFP") login, whether or not the client
+intends to use it. `core/tls.c`'s handshake dispatcher had no case for that message type at all,
+so a real connection failed with "unexpected handshake message type" the moment a real network
+(rather than this project's own single-cert local test server) was involved. Fixed per RFC 5246
+SS7.4.6: the client still must not skip this step, but replies with an empty Certificate message
+(`core/tls.c`'s new `handle_certificate_request`/`got_cert_request`) rather than actually
+presenting one -- client certificates remain an explicit non-goal. Confirmed two ways: a third
+`make tls-smoke` round against a real local `openssl s_server -verify 1` (18 checks total now),
+and a one-off host-side connection straight to `irc.libera.chat:6697` using RatChat's own
+unmodified `core/tls.c`, which completed the full handshake (`ECDHE-RSA-CHACHA20-POLY1305`) and a
+real IRC registration, MOTD included, end to end.
+
+As of this writing TLS has been confirmed working against a real public network from the
+development host, but still has not completed a full connection on real OPENSTEP hardware itself;
+the bugs above were build-, launch-, and protocol-level blockers on the way there, not a final
+real-hardware confirmation.
 
 ## Building
 

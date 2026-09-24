@@ -14,7 +14,11 @@
  * does instead: complete a real live handshake against real OpenSSL end to end, then read
  * OpenSSL's own -keylogfile and confirm ratchat's own independently derived master_secret is
  * bit-for-bit the same value OpenSSL itself thinks was negotiated -- for both TLS_ECDHE_RSA
- * suites (the two GCM/ChaCha20 hash choices), each against a fresh child s_server.
+ * suites (the two GCM/ChaCha20 hash choices), each against a fresh child s_server. A third round
+ * (-verify 1) reproduces real IRC networks' habit of sending CertificateRequest unconditionally
+ * (confirmed against a real network -- irc.libera.chat does this) to offer optional TLS
+ * client-certificate login: this client never has one to offer, but RFC 5246 SS7.4.6 still
+ * requires an empty Certificate reply, which is what this round actually exercises end to end.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,7 +108,7 @@ static int connect_retrying(int port)
 }
 
 static int run_one_handshake(const char *cert, const char *key, const char *cipher,
-                             int port, const char *keylog)
+                             int port, const char *keylog, int requestClientCert)
 {
     pid_t child;
     int fd, status, rc = 0;
@@ -125,9 +129,19 @@ static int run_one_handshake(const char *cert, const char *key, const char *ciph
             close(pfd[1]);
             dup2(pfd[0], 0);
             if (logfd >= 0) { dup2(logfd, 1); dup2(logfd, 2); }
-            execlp("openssl", "openssl", "s_server", "-cert", cert, "-key", key,
-                   "-tls1_2", "-cipher", cipher, "-accept", portbuf, "-keylogfile", keylog,
-                   "-quiet", "-naccept", "1", (char *)NULL);
+            /* -verify 1 (not -Verify): the server REQUESTS a client certificate (sends
+             * CertificateRequest) but does not require one -- the real-world case this whole
+             * scenario exists to cover, since real IRC networks send this unconditionally to
+             * offer optional "CertFP" login. */
+            if (requestClientCert) {
+                execlp("openssl", "openssl", "s_server", "-cert", cert, "-key", key,
+                       "-tls1_2", "-cipher", cipher, "-accept", portbuf, "-keylogfile", keylog,
+                       "-verify", "1", "-quiet", "-naccept", "1", (char *)NULL);
+            } else {
+                execlp("openssl", "openssl", "s_server", "-cert", cert, "-key", key,
+                       "-tls1_2", "-cipher", cipher, "-accept", portbuf, "-keylogfile", keylog,
+                       "-quiet", "-naccept", "1", (char *)NULL);
+            }
             _exit(127);
         }
         close(pfd[0]);
@@ -184,6 +198,7 @@ static int run_one_handshake(const char *cert, const char *key, const char *ciph
 
     CHECK(tls_is_established(s));
     CHECK(check_keylog(keylog, s));
+    CHECK((s->got_cert_request ? 1 : 0) == requestClientCert);
 
     {
         static const u8 hello[] = "hello from ratchat\n";
@@ -212,11 +227,20 @@ int main(void)
 
     printf("== ECDHE-RSA-AES128-GCM-SHA256 ==\n");
     run_one_handshake("build/tls_smoke.pem", "build/tls_smoke.key",
-                      "ECDHE-RSA-AES128-GCM-SHA256", 15801, "build/tls_smoke_gcm.keylog");
+                      "ECDHE-RSA-AES128-GCM-SHA256", 15801, "build/tls_smoke_gcm.keylog", 0);
 
     printf("== ECDHE-RSA-CHACHA20-POLY1305 ==\n");
     run_one_handshake("build/tls_smoke.pem", "build/tls_smoke.key",
-                      "ECDHE-RSA-CHACHA20-POLY1305", 15802, "build/tls_smoke_chacha.keylog");
+                      "ECDHE-RSA-CHACHA20-POLY1305", 15802, "build/tls_smoke_chacha.keylog", 0);
+
+    /* real IRC networks (irc.libera.chat confirmed) send CertificateRequest unconditionally, to
+     * offer optional TLS client-certificate ("CertFP") login -- this is what a first real-network
+     * connection actually hit: "unexpected handshake message type", since nothing handled it at
+     * all. Requesting-but-not-requiring a client cert from a real, independent OpenSSL server is
+     * the closest local reproduction of that real handshake shape. */
+    printf("== ECDHE-RSA-AES128-GCM-SHA256, server sends CertificateRequest ==\n");
+    run_one_handshake("build/tls_smoke.pem", "build/tls_smoke.key",
+                      "ECDHE-RSA-AES128-GCM-SHA256", 15803, "build/tls_smoke_certreq.keylog", 1);
 
     printf("tls_smoke: %d passed, %d failed\n", t_pass, t_fail);
     return t_fail ? 1 : 0;

@@ -255,6 +255,58 @@ static void test_client_hello_skips_sni_for_ip_literal(void)
     tls_free(s);
 }
 
+static size_t build_certificate_request_record(u8 *out)
+{
+    size_t msg_len = 4;                                 /* header only -- an empty body, since we
+                                                            never look at certificate_types/
+                                                            supported_signature_algorithms/CAs */
+    out[0] = CT_HANDSHAKE; out[1] = 3; out[2] = 3;
+    out[3] = (u8)(msg_len >> 8); out[4] = (u8)msg_len;
+    out[5] = HS_CERTIFICATE_REQUEST;
+    out[6] = 0; out[7] = 0; out[8] = 0;
+    return 5 + msg_len;
+}
+
+/* Real IRC networks (irc.libera.chat confirmed) send CertificateRequest unconditionally, between
+ * ServerKeyExchange and ServerHelloDone, to offer optional TLS client-certificate login -- this
+ * client never has one to offer, but must still accept the message (RFC 5246 SS7.4.6) rather than
+ * treating it as an unknown handshake message type, which is exactly what real-world testing first
+ * caught. Accepting it must not itself complete the flight (that's ServerHelloDone's job, tested
+ * end to end against real OpenSSL in tls_smoke.c) -- so here we only check that the state machine
+ * recognizes it, records it, and keeps waiting for the real ServerHelloDone next. */
+static void test_certificate_request_accepted_in_wait_shd(void)
+{
+    u8 rec[16];
+    size_t total = build_certificate_request_record(rec);
+    tls_session *s = tls_new("example.com");
+    s->started = 1;
+    s->state = TLS_ST_WAIT_SHD;
+    CHECK(tls_input(s, rec, total) == 0);
+    CHECK(!s->closed);
+    CHECK(s->got_cert_request == 1);
+    CHECK(s->state == TLS_ST_WAIT_SHD);
+    tls_free(s);
+}
+
+/* CertificateRequest only ever makes sense after ServerKeyExchange (or Certificate, if the
+ * suite needs no ServerKeyExchange) -- arriving any earlier is out of order and must be rejected
+ * like any other out-of-state handshake message, not silently accepted. */
+static void test_certificate_request_rejected_out_of_order(void)
+{
+    u8 rec[16];
+    size_t total = build_certificate_request_record(rec);
+    tls_session *s = tls_new("example.com");
+    tls_event ev;
+    int saw_error = 0;
+    s->started = 1;
+    s->state = TLS_ST_WAIT_SH;
+    CHECK(tls_input(s, rec, total) == -1);
+    CHECK(s->closed);
+    while (tls_next_event(s, &ev)) if (ev.type == TLS_EV_ERROR) saw_error = 1;
+    CHECK(saw_error);
+    tls_free(s);
+}
+
 /* A fatal alert's numeric description is mapped to its RFC 5246 name in the TLS_EV_ERROR text,
  * not just passed through as a bare number -- the whole point of having the table at all. */
 static void test_fatal_alert_names_the_description(void)
@@ -285,6 +337,8 @@ int main(void)
     test_truncated_header_waits();
     test_client_hello_shape();
     test_client_hello_skips_sni_for_ip_literal();
+    test_certificate_request_accepted_in_wait_shd();
+    test_certificate_request_rejected_out_of_order();
     test_fatal_alert_names_the_description();
     TEST_DONE("tls");
 }
