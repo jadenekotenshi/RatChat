@@ -237,6 +237,14 @@ static int nick_color_code(NSString *nick)
     NSString *text = ui_trim([inputField stringValue]);
     [inputField setStringValue:@""];
     historyPos = -1;
+    /* [V] Reported on real OPENSTEP 4.2 hardware: after Return submits a line, the field loses
+     * focus and needs an extra click before the next message can be typed. Reclaiming first
+     * responder explicitly is the standard fix for this on classic (pre-Mac-OS-X) AppKit, where
+     * ending a field editor's session on Return does not restore focus to the field on its own
+     * the way modern Cocoa does -- confirmed not reproducible host-side (a real synthetic Return
+     * keypress here never loses currentEditor status in the first place), so this can only be
+     * confirmed fixed on real hardware, not by an automated test. */
+    [window makeFirstResponder:inputField];
     if ([text length] == 0) return;
     if (!history) history = [[NSMutableArray alloc] init];
     [history addObject:text];

@@ -149,9 +149,21 @@ works, and the dedicated input-field layout (including Tab-completion/Up-Down hi
 `-control:textView:doCommandBySelector:` does exist and work on real OPENSTEP 4.2) does the right
 thing.
 
+**Confirmed on real OPENSTEP 4.2 hardware** (2026-09-24): TLS connects successfully end to end --
+after fixing the five bugs described below, a real TLS connection (via an intermediate VM) both
+built and completed a real handshake, closing out the last major unconfirmed piece of the TLS
+effort. A separate real-hardware-only quirk was also found and fixed this round: after Return
+submits a line in a channel/query window's input field, the field lost focus and needed an extra
+click before the next message could be typed -- classic (pre-Mac-OS-X) AppKit does not restore
+focus to a field on its own after Return the way modern Cocoa does. Fixed in
+`-[IRCChannelSession inputSubmitted:]` by reclaiming first responder explicitly; flagged `[V]`
+since it is not reproducible host-side at all (a real synthetic Return keypress here never loses
+focus in the first place, confirmed by directly testing it), so only the user's own next round of
+real-hardware testing can confirm the fix actually holds.
+
 **Not yet confirmed on real hardware**: the member list (`NSTableView`, used without issue in
 StepSSH's own `SFTPBrowser` but not yet exercised by RatChat there), per-nick colors and
-timestamps, CTCP auto-replies, DCC file transfer, and **all of TLS**. `NSCalendarDate`
+timestamps, CTCP auto-replies, and DCC file transfer. `NSCalendarDate`
 (timestamps, the CTCP `TIME` reply, and now the TLS trust dialog's not-yet-valid/expired
 warning) is standard OpenStep API but, unlike `NSDate`/`NSTimer` (already relied on throughout
 this whole family of projects' poll loops), has not been exercised on real OPENSTEP hardware by
@@ -162,17 +174,17 @@ sockets, no reason to expect trouble, but genuinely new to this codebase); `NSSa
 to choose where to save an incoming file) is confirmed working in StepSSH.
 
 TLS specifically: every crypto primitive, every protocol-parsing/framing piece, and the full
-handshake state machine have all been tested extremely thoroughly on the host (see above) --
+handshake state machine were tested extremely thoroughly on the host first (see above) --
 including full round trips against real, independent OpenSSL, both at the raw engine level
-(`make tls-smoke`) and through the actual app wiring (`make irc-tls-smoke`) -- but *nothing*
-TLS-related had run on gcc 2.7.2 or on real i386/m68k hardware before real-hardware testing
-started. The two specific real-hardware unknowns worth watching for, beyond "does it work at
-all": whether the pure-C89 crypto code's performance is acceptable on real period hardware for a
-handshake against a real public server (none of StepSSH's own crypto primitives were
-performance-profiled on real hardware either, just confirmed correct), and whether real public IRC
-networks' actual TLS configurations (certificate key types, negotiated cipher suite, any
-capability quirks) land inside this client's deliberately narrow scope -- `irc.libera.chat:6697`
-is the natural first real-network target.
+(`make tls-smoke`) and through the actual app wiring (`make irc-tls-smoke`) -- before any of it ran
+on gcc 2.7.2 or real i386/m68k hardware. It now has, and connects successfully (see "Confirmed on
+real OPENSTEP 4.2 hardware" above). Still genuinely open, since a successful connection alone
+doesn't settle either question: whether the pure-C89 crypto code's performance is acceptable on
+real period hardware for a handshake against a real public server (none of StepSSH's own crypto
+primitives were performance-profiled on real hardware either, just confirmed correct -- worth a
+deliberate look now that a full round trip works at all), and whether every real public IRC
+network's actual TLS configuration, not just the one tested, lands inside this client's
+deliberately narrow scope.
 
 Real-hardware bugs found and fixed while getting there (each one only surfaced compiling/running
 on the real thing -- `check-objc`/`make test` on the dev Mac couldn't have caught any of them):
@@ -203,10 +215,9 @@ and a one-off host-side connection straight to `irc.libera.chat:6697` using RatC
 unmodified `core/tls.c`, which completed the full handshake (`ECDHE-RSA-CHACHA20-POLY1305`) and a
 real IRC registration, MOTD included, end to end.
 
-As of this writing TLS has been confirmed working against a real public network from the
-development host, but still has not completed a full connection on real OPENSTEP hardware itself;
-the bugs above were build-, launch-, and protocol-level blockers on the way there, not a final
-real-hardware confirmation.
+All five bugs above were found and fixed in the course of getting from "builds on the host" to
+"connects on real OPENSTEP 4.2 hardware, against a real public network" -- which, as of
+2026-09-24, TLS now does.
 
 ## Building
 
