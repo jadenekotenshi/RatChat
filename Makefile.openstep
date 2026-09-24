@@ -44,7 +44,7 @@ ICONFLAGS = -sectcreate __ICON __header $(ICONHDR) -segprot __ICON r r -sectcrea
 
 CORE_OBJS = core/irc_parse.o core/dcc.o core/aes.o core/bignum.o core/chacha.o core/der.o \
             core/ecc.o core/hmac.o core/md5.o core/nacl.o core/rng.o core/rsa.o core/sha1.o \
-            core/sha2.o core/wire.o core/x509.o
+            core/sha2.o core/wire.o core/x509.o core/tls_wire.o core/tls_prf.o
 TERM_OBJS = term/nsenc.o term/vt.o
 APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IRCChannelSession.o \
             app/IRCConnection.o app/TerminalView.o app/UIHelpers.o app/main.o
@@ -107,9 +107,17 @@ build/test_x509: tests/test_x509.c $(CORE_OBJS)
 	-mkdir build
 	$(CC) $(CFLAGS) -o build/test_x509 tests/test_x509.c $(CORE_OBJS)
 
+build/test_tls_wire: tests/test_tls_wire.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_tls_wire tests/test_tls_wire.c $(CORE_OBJS)
+
+build/test_tls_prf: tests/test_tls_prf.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_tls_prf tests/test_tls_prf.c $(CORE_OBJS)
+
 test: build/test_vt build/test_irc_parse build/test_dcc \
       build/test_crypto build/test_bignum build/test_ecc build/test_rsa build/test_der \
-      build/test_x509
+      build/test_x509 build/test_tls_wire build/test_tls_prf
 	build/test_vt
 	build/test_irc_parse
 	build/test_dcc
@@ -119,6 +127,8 @@ test: build/test_vt build/test_irc_parse build/test_dcc \
 	build/test_rsa
 	build/test_der
 	build/test_x509
+	build/test_tls_wire
+	build/test_tls_prf
 
 # ---- install ----
 # OPENSTEP's own conventions: /LocalApps for a locally-built application (parallel to /NextApps

@@ -49,9 +49,15 @@ $(BUILD)/test_der: tests/test_der.c $(CORE_OBJ)
 $(BUILD)/test_x509: tests/test_x509.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_x509.c $(CORE_OBJ) -o $@
 
+$(BUILD)/test_tls_wire: tests/test_tls_wire.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_tls_wire.c $(CORE_OBJ) -o $@
+
+$(BUILD)/test_tls_prf: tests/test_tls_prf.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_tls_prf.c $(CORE_OBJ) -o $@
+
 test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
       $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa $(BUILD)/test_der \
-      $(BUILD)/test_x509
+      $(BUILD)/test_x509 $(BUILD)/test_tls_wire $(BUILD)/test_tls_prf
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
 	$(BUILD)/test_dcc
@@ -61,6 +67,8 @@ test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
 	$(BUILD)/test_rsa
 	$(BUILD)/test_der
 	$(BUILD)/test_x509
+	$(BUILD)/test_tls_wire
+	$(BUILD)/test_tls_prf
 
 lint:
 	sh tools/lint_openstep.sh
