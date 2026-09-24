@@ -21,10 +21,19 @@
     NSMutableArray      *dccTransfers;        /* every active DCCTransfer, send or receive */
     NSString            *ratchatDir;          /* ~/.ratchat, mirrors StepSSH's own ~/.ssh */
     NSString            *tlsPinsPath;         /* ~/.ratchat/tls_pins -- TOFU certificate pins */
+
+    NSString            *rngSeedPath;         /* ~/.ratchat/rng_seed -- mirrors StepSSH's seedPath */
+    NSPanel             *entropyPanel;
+    id                   entropyMeter;        /* EntropyMeter*, private to AppController.m */
+    NSString            *pendingHost, *pendingNick, *pendingUser, *pendingRealName;
+    int                  pendingPort;
 }
 - (void)buildMenu;
 /* Overrides where TOFU certificate pins are read/written -- ~/.ratchat/tls_pins by default. Only
  * needed by tests, which pre-seed a pin so a headless run never hits the (necessarily modal)
  * TLS_EV_CERT trust dialog. */
 - (void)setTLSPinsPath:(NSString *)path;
+/* EntropyMeter's target callback once the RNG pool is credited enough to use -- public only so
+ * the gcc 2.7.2 forward-declaration-within-@implementation limitation doesn't apply to it. */
+- (void)entropyReady;
 @end

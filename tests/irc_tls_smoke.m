@@ -9,12 +9,15 @@
  * The TLS_EV_CERT trust dialog is a real, synchronous, modal NSRunAlertPanel -- there is no
  * headless way to click it, so this test pre-seeds a matching pin (computed by the Makefile via
  * `openssl x509 ... | openssl dgst -sha256`, the same value core/tls_pins.c itself would compute)
- * before connecting, so tlspin_check() returns TLSPIN_MATCH and the dialog never appears. (An
- * unseeded RNG hits the exact same dialog from a different angle: tls_start() fails fast with
- * "not enough entropy," which AppController's own existing -ircConnection:didFailWithError:
- * reports via the *same* NSRunAlertPanel -- this took a real lldb backtrace of a "hung" first
- * draft to actually track down, since nothing about it looks like a hang from the caller's side;
- * see the RNG seeding below, the fix once found.)
+ * before connecting, so tlspin_check() returns TLSPIN_MATCH and the dialog never appears. An
+ * unseeded RNG used to hit the exact same dialog from a different angle: tls_start() failed fast
+ * with "not enough entropy," which AppController's own -ircConnection:didFailWithError: reported
+ * via the *same* NSRunAlertPanel -- this took a real lldb backtrace of a "hung" first draft to
+ * actually track down, since nothing about it looks like a hang from the caller's side. That gap
+ * (RatChat's app layer never seeded core/rng.c at all) was a real bug, later hit for real on
+ * OPENSTEP hardware connecting to a live network ("Could not start the TLS handshake") -- fixed by
+ * AppController's own -showEntropyPanel (see entropy_gate_smoke.m for that path's own test); this
+ * test still seeds the RNG itself below so it never has to drive that panel headless.
  * usage: irc_tls_smoke <port> <cert.pem> <key.pem> <pins-file>
  */
 #import "Compat.h"

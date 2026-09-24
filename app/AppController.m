@@ -3,9 +3,63 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "dcc.h"
+#include "rng.h"
 #include "oscompat.h"
 
 static NSString *S(const char *s) { return ui_string_from_utf8(s); }
+
+/* ---------------------------------------------------------------- */
+/* Entropy meter: a small panel that turns mouse and key timing into
+ * credited random bits.  Copied from StepSSH's own AppController.m
+ * verbatim (already hardware-confirmed there, including on real
+ * m68k) -- OPENSTEP 4.2 has no /dev/urandom worth trusting, so a TLS
+ * handshake's ephemeral keys need this exact same fallback. */
+
+@interface EntropyMeter : NSView
+{
+    id   target;
+    int  lastX, lastY;
+}
+- (void)setTarget:(id)t;
+@end
+
+@implementation EntropyMeter
+- (void)setTarget:(id)t { target = t; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
+- (BOOL)isOpaque { return YES; }
+
+- (void)feed:(NSEvent *)e
+{
+    NSPoint p = [e locationInWindow];
+    int x = (int)p.x, y = (int)p.y;
+    if (x == lastX && y == lastY) return;              /* only movement counts */
+    lastX = x; lastY = y;
+    ssh_rng_add(&p, sizeof(p), 0);
+    ssh_rng_add_timing(1);                             /* conservative: one bit per event */
+    [self setNeedsDisplay:YES];
+    if (ssh_rng_ready()) [target entropyReady];
+}
+- (void)mouseMoved:(NSEvent *)e   { [self feed:e]; }
+- (void)mouseDragged:(NSEvent *)e { [self feed:e]; }
+- (void)mouseDown:(NSEvent *)e    { [self feed:e]; }
+- (void)keyDown:(NSEvent *)e      { ssh_rng_add_timing(1); [self setNeedsDisplay:YES]; if (ssh_rng_ready()) [target entropyReady]; }
+
+- (void)drawRect:(NSRect)rect
+{
+    NSRect b = [self bounds], bar;
+    float frac = (float)ssh_rng_credited() / (float)SSH_RNG_MIN_BITS;
+    if (frac > 1.0) frac = 1.0;
+    [[NSColor controlBackgroundColor] set];
+    NSRectFill(b);
+    [[NSColor blackColor] set];
+    NSFrameRect(b);
+    bar = NSInsetRect(b, 2, 2);
+    bar.size.width *= frac;
+    [[NSColor selectedControlColor] set];
+    NSRectFill(bar);
+}
+@end
 
 /* gcc 2.7.2 does not look ahead within an @implementation. */
 @interface AppController (Private)
@@ -19,6 +73,8 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
 - (void)handleDCCRequest:(const char *)body fromNick:(NSString *)fromNick;
 - (IRCChannelSession *)sessionForDCCPeer:(NSString *)nick;
 - (void)dccSendFile:(NSString *)path toNick:(NSString *)nick;
+- (void)beginConnectHost:(NSString *)h port:(int)p nick:(NSString *)n user:(NSString *)u realName:(NSString *)r useTLS:(BOOL)tls;
+- (void)showEntropyPanel;
 @end
 
 @implementation AppController
@@ -31,6 +87,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     dccTransfers = [[NSMutableArray alloc] init];
     ratchatDir = [[NSHomeDirectory() stringByAppendingPathComponent:@".ratchat"] retain];
     tlsPinsPath = [[ratchatDir stringByAppendingPathComponent:@"tls_pins"] retain];
+    rngSeedPath = [[ratchatDir stringByAppendingPathComponent:@"rng_seed"] retain];
     return self;
 }
 
@@ -44,6 +101,9 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [dccTransfers release];
     [ratchatDir release];
     [tlsPinsPath release];
+    [rngSeedPath release];
+    [entropyPanel release];
+    [pendingHost release]; [pendingNick release]; [pendingUser release]; [pendingRealName release];
     [super dealloc];
 }
 
@@ -125,6 +185,15 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     NSLog(@"RatChat: applicationDidFinishLaunching");
     SSTrace("applicationDidFinishLaunching");
     [self prepareSecurityDirectory];
+    /* Best-effort now, so a saved seed from a prior TLS connection means this launch (and a
+     * plaintext-only session) never needs to wiggle the mouse at all -- mirrors StepSSH's own
+     * -applicationDidFinishLaunching exactly, except RatChat never *blocks* on this at launch:
+     * plaintext IRC needs no randomness, so only an actual TLS connection attempt gates on it. */
+    ssh_rng_seed_system();
+    ssh_rng_load_seed([rngSeedPath cString]);
+    NSLog(@"RatChat: random pool holds %d of %d bits", ssh_rng_credited(), SSH_RNG_MIN_BITS);
+    SSTrace("random pool holds %d of %d bits", ssh_rng_credited(), SSH_RNG_MIN_BITS);
+    if (ssh_rng_ready()) ssh_rng_save_seed([rngSeedPath cString]);
     [self showConnectPanel:nil];
 }
 
@@ -147,12 +216,71 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
                         @"OK", nil, nil);
         return;
     }
+    if (tls && !ssh_rng_ready()) {
+        [pendingHost release]; pendingHost = [h retain];
+        [pendingNick release]; pendingNick = [n retain];
+        [pendingUser release]; pendingUser = [u retain];
+        [pendingRealName release]; pendingRealName = [r retain];
+        pendingPort = p;
+        [self showEntropyPanel];
+        return;
+    }
+    [self beginConnectHost:h port:p nick:n user:u realName:r useTLS:tls];
+}
+
+- (void)beginConnectHost:(NSString *)h port:(int)p nick:(NSString *)n user:(NSString *)u
+                 realName:(NSString *)r useTLS:(BOOL)tls
+{
     [self setMyNick:n];
     nickRetries = 0;
     connection = [[IRCConnection alloc] initWithDelegate:self tlsPinsPath:tlsPinsPath];
     if (![connection connectToHost:h port:p nick:n user:u realName:r useTLS:tls]) {
         [connection release]; connection = nil;
     }
+}
+
+/* Only reached when a TLS connection was requested and the pool wasn't ready yet -- mirrors
+ * StepSSH's own entropy-seeding panel (see EntropyMeter above), the one part of that pattern
+ * every real OPENSTEP machine actually still needs, since there is no system /dev/urandom to
+ * fall back on there. */
+- (void)showEntropyPanel
+{
+    NSTextField *label;
+    if (entropyPanel) { [entropyPanel makeKeyAndOrderFront:nil]; return; }
+    entropyPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 360, 130)
+                                              styleMask:NSTitledWindowMask
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    [entropyPanel setTitle:@"Seeding random number generator"];
+    [entropyPanel setHidesOnDeactivate:NO];
+    [entropyPanel setAcceptsMouseMovedEvents:YES];
+    label = [[[NSTextField alloc] initWithFrame:NSMakeRect(16, 74, 328, 44)] autorelease];
+    [label setStringValue:@"TLS needs real randomness, and this computer has no built-in source of "
+                            "it. Move the mouse around inside this window until the bar is full."];
+    [label setEditable:NO]; [label setSelectable:NO]; [label setBezeled:NO];
+    [label setBordered:NO]; [label setDrawsBackground:NO];
+    entropyMeter = [[EntropyMeter alloc] initWithFrame:NSMakeRect(16, 24, 328, 26)];
+    [entropyMeter setTarget:self];
+    [[entropyPanel contentView] addSubview:label];
+    [[entropyPanel contentView] addSubview:entropyMeter];
+    [entropyPanel center];
+    [entropyPanel makeKeyAndOrderFront:nil];
+    [entropyPanel makeFirstResponder:entropyMeter];
+}
+
+- (void)entropyReady
+{
+    if (!entropyPanel) return;
+    ssh_rng_save_seed([rngSeedPath cString]);           /* remember it: next launch needs no wiggling */
+    [entropyPanel orderOut:nil];
+    [entropyMeter release]; entropyMeter = nil;
+    [entropyPanel release]; entropyPanel = nil;
+    [self beginConnectHost:pendingHost port:pendingPort nick:pendingNick user:pendingUser
+                   realName:pendingRealName useTLS:YES];
+    [pendingHost release]; pendingHost = nil;
+    [pendingNick release]; pendingNick = nil;
+    [pendingUser release]; pendingUser = nil;
+    [pendingRealName release]; pendingRealName = nil;
 }
 
 /* ---------------------------------------------------------------- */

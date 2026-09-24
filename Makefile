@@ -136,6 +136,20 @@ dcc-smoke:
 	$(CC) build/ds_*.o -framework Cocoa -o build/dcc_smoke
 	build/dcc_smoke
 
+# Confirms AppController gates a TLS connection attempt on a real, un-seeded RNG pool (showing
+# the entropy-seeding panel and stashing the request) rather than either failing fast or silently
+# under-seeding -- and that a plaintext connection is never gated on it at all. Must run in a
+# fresh process, since core/rng.c's pool is global static state with no reset -- see the test
+# file's own header.
+entropy-gate-smoke:
+	mkdir -p build
+	for f in tests/entropy_gate_smoke.m $(UI_SRC); do \
+	  $(CC) -c -x objective-c -fno-objc-arc -w -g -Iterm -Iapp -Icore $$f -o build/egs_$$(basename $$f .m).o || exit 1; \
+	done
+	for f in term/*.c core/*.c; do $(CC) -c -w -g -Iterm -Icore $$f -o build/egs_c_$$(basename $$f .c).o || exit 1; done
+	$(CC) build/egs_*.o -framework Cocoa -o build/entropy_gate_smoke
+	build/entropy_gate_smoke
+
 clean:
 	rm -rf build
 
@@ -167,4 +181,4 @@ irc-tls-smoke:
 	$(CC) build/its_*.o -framework Cocoa -o build/irc_tls_smoke
 	build/irc_tls_smoke 15901 build/irc_tls_smoke.pem build/irc_tls_smoke.key build/irc_tls_pins.txt
 
-.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke irc-tls-smoke clean
+.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke irc-tls-smoke entropy-gate-smoke clean

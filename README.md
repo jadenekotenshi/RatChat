@@ -64,7 +64,12 @@ new `~/.ratchat/tls_pins` -- mirrors StepSSH's own `~/.ssh/known_hosts` model fo
 exactly (same underlying question: "is this the same server identity I trusted before," not "is
 this transitively trusted by a CA"), including the same unknown/changed distinction and trust
 dialog shape. No CA chain validation, no revocation checking, no hostname-vs-SubjectAltName
-matching at all.
+matching at all. A TLS handshake also needs real randomness for its ephemeral keys; on a machine
+with no usable `/dev/urandom` (real OPENSTEP 4.2, confirmed) the very first TLS connection of a
+session shows a small "Seeding random number generator" panel and asks you to wiggle the mouse
+over it -- mirrors StepSSH's own entropy-seeding panel exactly, including saving the seed to
+`~/.ratchat/rng_seed` afterward so later launches don't need it again. Plaintext IRC never touches
+this at all.
 
 **Not built yet**: DCC CHAT (direct chat bypassing the server -- only DCC SEND, file transfer, is
 built), saved server profiles, and any of the fancier IRCv3 capabilities (SASL, message tags,
@@ -97,6 +102,12 @@ etc.).
   the (genuinely modal) trust dialog never needs a click. Confirms `NICK`/`USER` actually reach
   the real server decrypted correctly, and that a scripted server response decrypts correctly and
   completes registration. 4 checks.
+- `make entropy-gate-smoke` -- confirms `AppController` actually gates a TLS connection attempt on
+  a real, un-seeded `core/rng.c` pool (showing the entropy-seeding panel and holding the request)
+  rather than either failing fast or connecting anyway with too little randomness, and that a
+  plaintext connection is never gated on it at all. Has to run first in its own fresh process,
+  since the RNG pool is global static state with no reset -- see the test file's own header. 14
+  checks.
 - `make irc-smoke` -- drives a *real* `AppController`/`IRCConnection`/`IRCChannelSession` stack
   against a scripted fake IRC server (a real TCP listener on `127.0.0.1`, not a mock): a real
   non-blocking `connect()`, real `NICK`/`USER` registration, `/join` opening a channel window on
@@ -150,13 +161,27 @@ TLS specifically: every crypto primitive, every protocol-parsing/framing piece, 
 handshake state machine have all been tested extremely thoroughly on the host (see above) --
 including full round trips against real, independent OpenSSL, both at the raw engine level
 (`make tls-smoke`) and through the actual app wiring (`make irc-tls-smoke`) -- but *nothing*
-TLS-related has yet run on gcc 2.7.2 or on real i386/m68k hardware. The two specific real-hardware
-unknowns worth watching for, beyond "does it work at all": whether the pure-C89 crypto code's
-performance is acceptable on real period hardware for a handshake against a real public server
-(none of StepSSH's own crypto primitives were performance-profiled on real hardware either, just
-confirmed correct), and whether real public IRC networks' actual TLS configurations (certificate
-key types, negotiated cipher suite, any capability quirks) land inside this client's
-deliberately narrow scope -- `irc.libera.chat:6697` is the natural first real-network target.
+TLS-related had run on gcc 2.7.2 or on real i386/m68k hardware before real-hardware testing
+started. The two specific real-hardware unknowns worth watching for, beyond "does it work at
+all": whether the pure-C89 crypto code's performance is acceptable on real period hardware for a
+handshake against a real public server (none of StepSSH's own crypto primitives were
+performance-profiled on real hardware either, just confirmed correct), and whether real public IRC
+networks' actual TLS configurations (certificate key types, negotiated cipher suite, any
+capability quirks) land inside this client's deliberately narrow scope -- `irc.libera.chat:6697`
+is the natural first real-network target.
+
+Real-hardware bugs found and fixed while getting there (each one only surfaced compiling/running
+on the real thing -- `check-objc`/`make test` on the dev Mac couldn't have caught any of them):
+`ConnectController.m`'s "Use TLS" switch compared its state against `NSOnState`, which real
+OPENSTEP 4.2 headers never declared (modern AppKit still ships it as a deprecated-but-present
+alias); `DCCTransfer.m` used a raw `socklen_t` at one call site instead of the file's own
+OPENSTEP-gated `sock_len_t` typedef (POSIX.1g, 1998 -- newer than OPENSTEP 4.2's own headers);
+and, the substantial one, RatChat's app layer never seeded `core/rng.c` at all, so a TLS
+connection's `tls_start()` correctly failed fast with "not enough entropy" the moment real
+hardware (with no `/dev/urandom`) actually needed real randomness -- fixed by porting StepSSH's
+own entropy-seeding panel over (see "What it does" above and `make entropy-gate-smoke`). As of
+this writing TLS has not yet completed a full connection on real hardware; these were build- and
+launch-time blockers on the way there, not a final confirmation.
 
 ## Building
 
@@ -166,6 +191,7 @@ make irc-smoke      # a real socket/connection/window session, end to end, again
 make dcc-smoke      # a real file transfer, end to end, between two DCCTransfer instances
 make tls-smoke      # a real TLS 1.2 handshake, end to end, against a real local openssl s_server
 make irc-tls-smoke  # the same, but through the actual app-layer TLS wiring
+make entropy-gate-smoke  # confirms TLS (and only TLS) gates on the RNG pool being seeded
 make lint check-objc     # style/portability checks
 ```
 
@@ -221,7 +247,13 @@ tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N
   parsed message belongs to, and formatting it for display) and each session's owner (dispatching
   submitted lines as either a slash command or a plain `PRIVMSG`). Also creates `~/.ratchat`
   (mode&nbsp;0700) at launch to hold `tls_pins`, the TOFU pin store `core/tls_pins.c` reads and
-  writes.
+  writes. Best-effort seeds `core/rng.c` (vendored from StepSSH in Phase 0 of the TLS effort, but
+  originally never wired up at the app layer at all -- a real bug, found on real hardware) at
+  launch from `/dev/urandom` and a saved `~/.ratchat/rng_seed`; if a TLS connection is requested
+  before the pool is credited enough, `-showEntropyPanel` (a straight port of StepSSH's own
+  `EntropyMeter`/seeding-panel class) stashes the request and shows a "wiggle the mouse" panel,
+  resuming the connection from `-entropyReady` once the pool is ready. Plaintext connections never
+  touch any of this.
 - `app/ConnectController.m`/`.h` -- new. A small server/port/nick/username/real-name panel,
   shaped like StepSSH's own connect panel but trimmed to what an unauthenticated IRC connection
   actually needs, plus a "Use TLS" switch that flips the port field's default between 6667 and
