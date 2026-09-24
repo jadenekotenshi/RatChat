@@ -63,5 +63,10 @@ if command -v python3 >/dev/null 2>&1; then
     python3 tools/check_method_order.py >/dev/null || { python3 tools/check_method_order.py; status=1; }
 fi
 
+# --- string literals split across lines via implicit adjacent-literal concatenation ---
+if command -v python3 >/dev/null 2>&1; then
+    python3 tools/check_string_concat.py >/dev/null || { python3 tools/check_string_concat.py; status=1; }
+fi
+
 if [ $status -eq 0 ]; then echo "lint: clean"; fi
 exit $status

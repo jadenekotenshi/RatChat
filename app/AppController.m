@@ -255,8 +255,7 @@ static NSString *S(const char *s) { return ui_string_from_utf8(s); }
     [entropyPanel setHidesOnDeactivate:NO];
     [entropyPanel setAcceptsMouseMovedEvents:YES];
     label = [[[NSTextField alloc] initWithFrame:NSMakeRect(16, 74, 328, 44)] autorelease];
-    [label setStringValue:@"TLS needs real randomness, and this computer has no built-in source of "
-                            "it. Move the mouse around inside this window until the bar is full."];
+    [label setStringValue:@"TLS needs real randomness, and this computer has no built-in source of it. Move the mouse around inside this window until the bar is full."];
     [label setEditable:NO]; [label setSelectable:NO]; [label setBezeled:NO];
     [label setBordered:NO]; [label setDrawsBackground:NO];
     entropyMeter = [[EntropyMeter alloc] initWithFrame:NSMakeRect(16, 24, 328, 26)];
