@@ -42,7 +42,9 @@ ICONHDR   = app/RatChat.iconheader
 ICONTIFF  = app/RatChat.tiff
 ICONFLAGS = -sectcreate __ICON __header $(ICONHDR) -segprot __ICON r r -sectcreate __ICON app $(ICONTIFF)
 
-CORE_OBJS = core/irc_parse.o core/dcc.o
+CORE_OBJS = core/irc_parse.o core/dcc.o core/aes.o core/bignum.o core/chacha.o core/ecc.o \
+            core/hmac.o core/md5.o core/nacl.o core/rng.o core/rsa.o core/sha1.o core/sha2.o \
+            core/wire.o
 TERM_OBJS = term/nsenc.o term/vt.o
 APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IRCChannelSession.o \
             app/IRCConnection.o app/TerminalView.o app/UIHelpers.o app/main.o
@@ -81,10 +83,31 @@ build/test_dcc: tests/test_dcc.c $(CORE_OBJS)
 	-mkdir build
 	$(CC) $(CFLAGS) -o build/test_dcc tests/test_dcc.c $(CORE_OBJS)
 
-test: build/test_vt build/test_irc_parse build/test_dcc
+build/test_crypto: tests/test_crypto.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_crypto tests/test_crypto.c $(CORE_OBJS)
+
+build/test_bignum: tests/test_bignum.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_bignum tests/test_bignum.c $(CORE_OBJS)
+
+build/test_ecc: tests/test_ecc.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_ecc tests/test_ecc.c $(CORE_OBJS)
+
+build/test_rsa: tests/test_rsa.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/test_rsa tests/test_rsa.c $(CORE_OBJS)
+
+test: build/test_vt build/test_irc_parse build/test_dcc \
+      build/test_crypto build/test_bignum build/test_ecc build/test_rsa
 	build/test_vt
 	build/test_irc_parse
 	build/test_dcc
+	build/test_crypto
+	build/test_bignum
+	build/test_ecc
+	build/test_rsa
 
 # ---- install ----
 # OPENSTEP's own conventions: /LocalApps for a locally-built application (parallel to /NextApps

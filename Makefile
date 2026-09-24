@@ -31,10 +31,27 @@ $(BUILD)/test_irc_parse: tests/test_irc_parse.c $(CORE_OBJ)
 $(BUILD)/test_dcc: tests/test_dcc.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_dcc.c $(CORE_OBJ) -o $@
 
-test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc
+$(BUILD)/test_crypto: tests/test_crypto.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_crypto.c $(CORE_OBJ) -o $@
+
+$(BUILD)/test_bignum: tests/test_bignum.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_bignum.c $(CORE_OBJ) -o $@
+
+$(BUILD)/test_ecc: tests/test_ecc.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_ecc.c $(CORE_OBJ) -o $@
+
+$(BUILD)/test_rsa: tests/test_rsa.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_rsa.c $(CORE_OBJ) -o $@
+
+test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
+      $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
 	$(BUILD)/test_dcc
+	$(BUILD)/test_crypto
+	$(BUILD)/test_bignum
+	$(BUILD)/test_ecc
+	$(BUILD)/test_rsa
 
 lint:
 	sh tools/lint_openstep.sh
