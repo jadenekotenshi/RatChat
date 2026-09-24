@@ -43,8 +43,11 @@ $(BUILD)/test_ecc: tests/test_ecc.c $(CORE_OBJ)
 $(BUILD)/test_rsa: tests/test_rsa.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_rsa.c $(CORE_OBJ) -o $@
 
+$(BUILD)/test_der: tests/test_der.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tests/test_der.c $(CORE_OBJ) -o $@
+
 test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
-      $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa
+      $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa $(BUILD)/test_der
 	$(BUILD)/test_vt
 	$(BUILD)/test_irc_parse
 	$(BUILD)/test_dcc
@@ -52,6 +55,7 @@ test: $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
 	$(BUILD)/test_bignum
 	$(BUILD)/test_ecc
 	$(BUILD)/test_rsa
+	$(BUILD)/test_der
 
 lint:
 	sh tools/lint_openstep.sh
