@@ -85,11 +85,18 @@ static int nick_color_code(NSString *nick)
     if ([window respondsToSelector:@selector(setResizeIncrements:)])
         [window setResizeIncrements:NSMakeSize(1, 1)];
 
+    /* Scrollbar on the left, not the right -- genuine OPENSTEP/NeXTSTEP AppKit's own native
+     * default for NSScrollView's vertical scroller (NSMinXEdge; it only moves to the right under
+     * the NSMacintoshInterfaceStyle/NSWindows95InterfaceStyle compatibility styles, neither of
+     * which this app requests). This view's scroller is a plain NSScroller positioned by hand
+     * rather than an NSScrollView, so it does not inherit that platform default automatically --
+     * placed on the left explicitly here to match it. (The member list's own scrollbar, further
+     * right, is a real NSScrollView and already gets this for free.) */
     container = [[NSView alloc] initWithFrame:content];
-    [termView setFrame:NSMakeRect(0, INPUT_HEIGHT, cs.width, cs.height)];
+    [termView setFrame:NSMakeRect(sw, INPUT_HEIGHT, cs.width, cs.height)];
     [termView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
-    scroller = [[NSScroller alloc] initWithFrame:NSMakeRect(cs.width, INPUT_HEIGHT, sw, cs.height)];
-    [scroller setAutoresizingMask:(NSViewHeightSizable | NSViewMinXMargin)];
+    scroller = [[NSScroller alloc] initWithFrame:NSMakeRect(0, INPUT_HEIGHT, sw, cs.height)];
+    [scroller setAutoresizingMask:(NSViewHeightSizable | NSViewMaxXMargin)];
     [container addSubview:termView];
     [container addSubview:scroller];
 
