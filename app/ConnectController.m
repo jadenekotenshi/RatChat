@@ -102,7 +102,7 @@
 - (void)toggleTLS:(id)sender
 {
     NSString *cur = [portField stringValue];
-    if ([tlsSwitch state] == NSOnState) {
+    if ([tlsSwitch state]) {
         if ([cur isEqualToString:@"6667"]) [portField setStringValue:@"6697"];
     } else {
         if ([cur isEqualToString:@"6697"]) [portField setStringValue:@"6667"];
@@ -116,7 +116,7 @@
     NSString *u = ui_trim([userField stringValue]);
     NSString *r = ui_trim([realNameField stringValue]);
     int p = [[portField stringValue] intValue];
-    BOOL useTLS = [tlsSwitch state] == NSOnState;
+    BOOL useTLS = [tlsSwitch state] ? YES : NO;
 
     if ([h length] == 0 || [nk length] == 0) {
         NSRunAlertPanel(@"Missing information", @"Enter a server and a nickname.", @"OK", nil, nil);
