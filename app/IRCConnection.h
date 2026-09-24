@@ -20,7 +20,7 @@ enum { IRC_DISCONNECTED, IRC_CONNECTING, IRC_TLS_HANDSHAKING, IRC_REGISTERING, I
     int      state;
     NSTimer *timer;
     id       delegate;
-    long     ticks, connectDeadline;
+    long     ticks, connectDeadline, tlsDeadline;
     int      inTick;
 
     char    inbuf[4096];             /* accumulates partial lines across reads */

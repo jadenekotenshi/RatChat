@@ -214,6 +214,68 @@ static void test_client_hello_shape(void)
     tls_free(s);
 }
 
+/* RFC 6066: SNI names a host, not an address -- a literal IPv4 Server field has nothing
+ * meaningful to put there, so it must be omitted entirely rather than sent as a bogus "hostname"
+ * that happens to look like an IP. */
+static void test_client_hello_skips_sni_for_ip_literal(void)
+{
+    tls_session *s;
+    const u8 *out;
+    size_t len, sid_len, cs_len, comp_len;
+    sreader r, er;
+    u32 ext_len;
+    int found_sni;
+
+    seed_rng();
+    s = tls_new("127.0.0.1");
+    CHECK(tls_start(s) == 0);
+    out = tls_output(s, &len);
+    CHECK(out != NULL && len > 9);
+
+    sr_init(&r, out + 9, len - 9);
+    tls_get_u16(&r);
+    sr_bytes(&r, 32);
+    tls_get_vec8(&r, &sid_len);
+    tls_get_vec16(&r, &cs_len);
+    tls_get_vec8(&r, &comp_len);
+    ext_len = tls_get_u16(&r);
+    CHECK(!r.err);
+
+    found_sni = 0;
+    sr_init(&er, r.p + r.pos, ext_len);
+    while (sr_left(&er) >= 4) {
+        u32 etype = tls_get_u16(&er);
+        size_t edata_len;
+        const u8 *edata = tls_get_vec16(&er, &edata_len);
+        if (!edata) break;
+        if (etype == 0x0000) found_sni = 1;
+    }
+    CHECK(!found_sni);
+
+    tls_free(s);
+}
+
+/* A fatal alert's numeric description is mapped to its RFC 5246 name in the TLS_EV_ERROR text,
+ * not just passed through as a bare number -- the whole point of having the table at all. */
+static void test_fatal_alert_names_the_description(void)
+{
+    tls_session *s = tls_new("example.com");
+    static const u8 rec[] = { CT_ALERT, 3, 3, 0, 2, 2, 46 };   /* fatal, certificate_unknown */
+    tls_event ev;
+    int found;
+
+    s->started = 1;
+    s->state = TLS_ST_WAIT_SH;
+    CHECK(tls_input(s, rec, sizeof(rec)) == -1);
+    CHECK(s->closed);
+    found = 0;
+    while (tls_next_event(s, &ev)) {
+        if (ev.type == TLS_EV_ERROR && strstr(ev.text, "certificate_unknown") != NULL) found = 1;
+    }
+    CHECK(found);
+    tls_free(s);
+}
+
 int main(void)
 {
     test_split_delivery();
@@ -222,5 +284,7 @@ int main(void)
     test_oversized_record_rejected();
     test_truncated_header_waits();
     test_client_hello_shape();
+    test_client_hello_skips_sni_for_ip_literal();
+    test_fatal_alert_names_the_description();
     TEST_DONE("tls");
 }

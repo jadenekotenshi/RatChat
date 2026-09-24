@@ -2,6 +2,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+
+#ifndef INADDR_NONE
+#define INADDR_NONE ((unsigned long)0xffffffff)
+#endif
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -148,6 +153,18 @@ static int send_handshake(tls_session *s, int hs_type, const u8 *body, size_t bo
 /* ClientHello                                                         */
 /* ------------------------------------------------------------------ */
 
+/* RFC 6066 SS3: SNI names a host, not an address -- there is nothing meaningful to send when the
+ * Server field the caller connected to was itself a literal IPv4 address (IRCConnection.m's own
+ * connectToHost:...  already makes exactly this same inet_addr()/INADDR_NONE distinction to
+ * decide whether to skip gethostbyname(); this engine makes it again independently rather than
+ * depend on the caller telling it, since a sans-I/O engine that only ever sees `hostname` as a
+ * plain string is the one thing that should stay self-contained here). IPv6 literals are not a
+ * concern anywhere else in this project family either. */
+static int is_ip_literal(const char *host)
+{
+    return inet_addr(host) != INADDR_NONE;
+}
+
 static int build_client_hello(tls_session *s)
 {
     sbuf b, extb;
@@ -172,7 +189,7 @@ static int build_client_hello(tls_session *s)
     sb_put_u8(&b, 1); sb_put_u8(&b, 0);                /* compression_methods: [null] */
 
     sb_init(&extb);
-    if (s->hostname && s->hostname[0]) {
+    if (s->hostname && s->hostname[0] && !is_ip_literal(s->hostname)) {
         size_t hlen = strlen(s->hostname);
         tls_put_u16(&extb, 0x0000);                    /* server_name */
         tls_put_u16(&extb, (u32)(2 + 1 + 2 + hlen));
@@ -544,16 +561,48 @@ static int handle_change_cipher_spec(tls_session *s, const u8 *content, size_t l
     return 0;
 }
 
+/* RFC 5246 SS7.2: names for the AlertDescription values a peer might actually send us (the ones
+ * this engine's own narrow scope can provoke or receive); anything else falls back to its raw
+ * numeric value rather than guessing at a name that might be wrong. */
+static const char *alert_desc_name(u8 d)
+{
+    switch (d) {
+    case 10: return "unexpected_message";
+    case 20: return "bad_record_mac";
+    case 22: return "record_overflow";
+    case 40: return "handshake_failure";
+    case 42: return "bad_certificate";
+    case 43: return "unsupported_certificate";
+    case 44: return "certificate_revoked";
+    case 45: return "certificate_expired";
+    case 46: return "certificate_unknown";
+    case 47: return "illegal_parameter";
+    case 48: return "unknown_ca";
+    case 49: return "access_denied";
+    case 50: return "decode_error";
+    case 51: return "decrypt_error";
+    case 70: return "protocol_version";
+    case 71: return "insufficient_security";
+    case 80: return "internal_error";
+    case 90: return "user_canceled";
+    case 110: return "unsupported_extension";
+    default: return NULL;
+    }
+}
+
 static int handle_alert(tls_session *s, const u8 *content, size_t len)
 {
     char msg[64];
+    const char *name;
     if (len != 2) { tls_fail(s, "malformed alert"); return -1; }
     if (content[1] == 0) {                             /* close_notify: a clean shutdown */
         tls_push_event(s, TLS_EV_CLOSED, NULL, 0, NULL, NULL);
         s->closed = 1;
         return 0;
     }
-    sprintf(msg, "peer sent a fatal alert (level=%d desc=%d)", content[0], content[1]);
+    name = alert_desc_name(content[1]);
+    if (name) sprintf(msg, "peer sent a fatal alert: %s", name);
+    else sprintf(msg, "peer sent a fatal alert (%d)", content[1]);
     tls_fail(s, msg);
     return -1;
 }

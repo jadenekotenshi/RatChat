@@ -1,5 +1,6 @@
 #import "IRCConnection.h"
 #import "UIHelpers.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -12,6 +13,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include "tls_pins.h"
+#include "x509.h"
+#include "der.h"
 #include "oscompat.h"
 
 #ifndef INADDR_NONE
@@ -41,6 +44,7 @@ typedef socklen_t sock_len_t;
 - (void)flushTLSOutput;
 - (BOOL)drainTLSEvents;                       /* returns NO if the connection ended while draining */
 - (void)handleTLSCert:(const tls_event *)ev;
+- (NSString *)tlsValidityWarningForCert:(const tls_event *)ev;
 @end
 
 @implementation IRCConnection
@@ -131,6 +135,7 @@ typedef socklen_t sock_len_t;
 {
     if (useTLS) {
         state = IRC_TLS_HANDSHAKING;
+        tlsDeadline = ticks + CONNECT_TIMEOUT * TICKS_PER_SEC;
         tls = tls_new([host cString]);
         if (!tls || tls_start(tls) != 0) {
             [self endWithMessage:@"Could not start the TLS handshake"];
@@ -206,6 +211,39 @@ typedef socklen_t sock_len_t;
     return YES;
 }
 
+/* Best-effort, display-only, never gates anything: OPENSTEP's own NSCalendarDate reliability is
+ * unconfirmed [V] (nothing in this project family has exercised more of it than ui_timestamp()'s
+ * own single "%H:%M" format so far), and a certificate's validity window plays no part in this
+ * project's TOFU trust decision anyway (see the TLS plan -- pinning is about "is this the same
+ * server identity," not chain/date validation). If this parse or comparison fails or comes out
+ * wrong for any reason, the only possible outcome is a missing or misleading FYI line in the
+ * dialog text, never a wrongly accepted or wrongly rejected certificate. Local time vs. the
+ * certificate's own UTC times is a real, accepted imprecision here (up to ~14 hours skew) --
+ * fine for a warning about a validity window that is ordinarily months or years wide. */
+- (NSString *)tlsValidityWarningForCert:(const tls_event *)ev
+{
+    NSString *warning = @"";
+    x509_cert cert;
+    const char *err;
+
+    x509_cert_init(&cert);
+    if (x509_parse_leaf(ev->data, ev->len, &cert, &err) == 0) {
+        NSCalendarDate *now = [NSCalendarDate calendarDate];
+        NSString *nowStr = [now descriptionWithCalendarFormat:@"%Y %m %d %H %M %S"];
+        der_time nowt;
+        if (sscanf([nowStr cString], "%d %d %d %d %d %d",
+                   &nowt.year, &nowt.month, &nowt.day, &nowt.hour, &nowt.min, &nowt.sec) == 6) {
+            if (der_time_cmp(&nowt, &cert.not_before) < 0) {
+                warning = @"\n\nWARNING: this certificate is not yet valid.";
+            } else if (der_time_cmp(&nowt, &cert.not_after) > 0) {
+                warning = @"\n\nWARNING: this certificate has expired.";
+            }
+        }
+    }
+    x509_cert_free(&cert);
+    return warning;
+}
+
 /* Mirrors SSHSession.m's own -handleHostKey: exactly: check the pin store first (a MATCH never
  * prompts at all), differentiate an unseen certificate from a changed one, and only tlspin_add()
  * on the "Connect"/first-trust path -- a changed certificate is never written back automatically. */
@@ -213,6 +251,7 @@ typedef socklen_t sock_len_t;
 {
     NSString *fp = [NSString stringWithCString:ev->text];
     NSString *cn = [NSString stringWithCString:ev->text2];
+    NSString *warning = [self tlsValidityWarningForCert:ev];
     int r = tlspin_check([tlsPinsPath cString], [host cString], port, ev->data, ev->len);
     int ans;
 
@@ -220,9 +259,9 @@ typedef socklen_t sock_len_t;
 
     if (r == TLSPIN_UNKNOWN) {
         ans = NSRunAlertPanel(@"Unknown certificate",
-            @"The authenticity of host '%@' can't be established.\n\nSubject: %@\nFingerprint: %@\n\n\
+            @"The authenticity of host '%@' can't be established.\n\nSubject: %@\nFingerprint: %@%@\n\n\
 If you trust this host, connect to remember its certificate.",
-            @"Connect", @"Cancel", nil, host, cn, fp);
+            @"Connect", @"Cancel", nil, host, cn, fp, warning);
         if (ans == NSAlertDefaultReturn) {
             tlspin_add([tlsPinsPath cString], [host cString], port, ev->data, ev->len);
             tls_cert_accept(tls, 1);
@@ -236,8 +275,8 @@ If you trust this host, connect to remember its certificate.",
     ans = NSRunAlertPanel(@"WARNING: CERTIFICATE HAS CHANGED",
         @"The certificate for '%@' is different from the one saved in %@.\n\n\
 Someone may be eavesdropping on this connection, or the host's certificate was legitimately renewed.\n\n\
-New fingerprint:\n%@",
-        @"Cancel", @"Connect Once", nil, host, tlsPinsPath, fp);
+New fingerprint:\n%@%@",
+        @"Cancel", @"Connect Once", nil, host, tlsPinsPath, fp, warning);
     tls_cert_accept(tls, ans == NSAlertAlternateReturn ? 1 : 0);
 }
 
@@ -265,6 +304,8 @@ New fingerprint:\n%@",
         } else if ((int)(ticks - connectDeadline) > 0) {
             [self endWithMessage:@"Connection timed out"];
         }
+    } else if (state == IRC_TLS_HANDSHAKING && (int)(ticks - tlsDeadline) > 0) {
+        [self endWithMessage:@"TLS handshake timed out"];
     } else if (state == IRC_TLS_HANDSHAKING || state == IRC_REGISTERING || state == IRC_CONNECTED) {
         [self pump];
     }
