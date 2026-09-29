@@ -13,6 +13,16 @@ typedef i64 gf[16];
 
 #include "nacl_tab.h"
 
+/*
+ * gcc 2.7.2's m68k backend miscompiles a 64-bit arithmetic right shift by the constant 16: the
+ * high word of the result comes out zero, so every negative or wide value comes back wrong (found
+ * on a real 68040 by tests/test_prims.c; the same shift by 15, 17 or any other constant, or by a
+ * variable count, is fine).  Every 16-bit-limb shift in this file goes through SAR16, which hands
+ * the compiler a count it cannot see, so it emits the generic (correct) shift instead.
+ */
+static volatile int sar16_count = 16;
+#define SAR16(x) ((x) >> sar16_count)
+
 static const gf gf0 = {0};
 static const gf gf1 = {1};
 static const gf gf_121665 = {0xDB41, 1};
@@ -29,7 +39,7 @@ static void car25519(gf o)
     i64 c;
     for (i = 0; i < 16; i++) {
         o[i] += (1LL << 16);
-        c = o[i] >> 16;
+        c = SAR16(o[i]);
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
         o[i] -= c * 65536;   /* not '<<': c may be negative */
     }
@@ -55,11 +65,11 @@ static void pack25519(u8 *o, const gf n)
     for (j = 0; j < 2; j++) {
         m[0] = t[0] - 0xffed;
         for (i = 1; i < 15; i++) {
-            m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
+            m[i] = t[i] - 0xffff - (SAR16(m[i - 1]) & 1);
             m[i - 1] &= 0xffff;
         }
-        m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
-        b = (int)((m[15] >> 16) & 1);
+        m[15] = t[15] - 0x7fff - (SAR16(m[14]) & 1);
+        b = (int)(SAR16(m[15]) & 1);
         m[14] &= 0xffff;
         sel25519(t, m, 1 - b);
     }
@@ -105,7 +115,8 @@ static void fsub(gf o, const gf a, const gf b)
 
 static void fmul(gf o, const gf a, const gf b)
 {
-    i64 i, j, t[31];
+    int i, j;
+    i64 t[31];
     for (i = 0; i < 31; i++) t[i] = 0;
     for (i = 0; i < 16; i++)
         for (j = 0; j < 16; j++) t[i + j] += a[i] * b[j];
@@ -149,7 +160,8 @@ static void pow2523(gf o, const gf i)
 void x25519(u8 out[32], const u8 scalar[32], const u8 point[32])
 {
     u8 z[32];
-    i64 x[80], r, i;
+    i64 x[80];
+    int r, i;
     gf a, b, c, d, e, f;
 
     for (i = 0; i < 31; i++) z[i] = scalar[i];
@@ -278,7 +290,8 @@ static const i64 L[32] = {
 
 static void modL(u8 *r, i64 x[64])
 {
-    i64 carry, i, j;
+    i64 carry;
+    int i, j;
     for (i = 63; i >= 32; --i) {
         carry = 0;
         for (j = i - 32; j < i - 12; ++j) {
@@ -304,7 +317,8 @@ static void modL(u8 *r, i64 x[64])
 
 static void reduce64(u8 r[64])
 {
-    i64 x[64], i;
+    i64 x[64];
+    int i;
     for (i = 0; i < 64; ++i) x[i] = r[i];
     for (i = 0; i < 64; ++i) r[i] = 0;
     modL(r, x);
@@ -326,7 +340,8 @@ void ed25519_keypair(u8 pk[32], u8 sk[64], const u8 seed[32])
 void ed25519_sign(u8 sig[64], const u8 *msg, size_t len, const u8 sk[64])
 {
     u8 d[64], h[64], r[64];
-    i64 x[64], i, j;
+    i64 x[64];
+    int i, j;
     gf p[4];
     sha512_ctx c;
 
