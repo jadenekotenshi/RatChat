@@ -301,13 +301,12 @@ i386 and on SPARC, `bench-bulk` gives results similar to StepSSH's for the same 
 works just as well as it did before the port. The test suite was run too and passed (the report did not
 say per machine). No figures were recorded here.
 
-**m68k (68040), partly tested**: the slice launches and makes a TLS connection (confirmed 2026-09-30, as
-reported by the person who ran it). That is the first time RatChat's TLS has run on the 68040, and it
-means the 0.2.1 fix for gcc 2.7.2's 64-bit `>> 16` miscompile (which made every X25519 key exchange
-compute a wrong shared secret there) works in RatChat itself, not only in StepSSH -- the client offers
-X25519 first, though the report did not say which curve or cipher suite the server picked. The full 68040
-run is still in progress, and the report did not say whether the test suite was run there, so that stays
-`[V]`.
+**m68k (68040)** (2026-09-30, as reported by the person who ran it): the slice launches, makes a TLS
+connection, and the whole test suite passes on it. That is the first time RatChat's TLS has run on the
+68040, and it means the 0.2.1 fix for gcc 2.7.2's 64-bit `>> 16` miscompile (which made every X25519 key
+exchange compute a wrong shared secret there) works in RatChat itself, not only in StepSSH -- the client
+offers X25519 first, though the report did not say which curve or cipher suite the server picked. No
+`bench-bulk` figures from the 68040 were reported.
 
 ## Architecture notes
 
