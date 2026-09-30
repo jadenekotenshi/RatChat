@@ -298,12 +298,13 @@ checked by dry run with a faked `arch(1)`.
 
 **Confirmed on real OPENSTEP 4.2 hardware** (2026-09-30, as reported by the person who ran it): on the
 i386 and on SPARC, `bench-bulk` gives results similar to StepSSH's for the same primitives, and the app
-works just as well as it did before the port. No figures were recorded here.
+works just as well as it did before the port. The test suite was run too and passed (the report did not
+say per machine). No figures were recorded here.
 
-**Not yet fully tested**: the m68k (68040) slice, which is still being tested. StepSSH's identical
-primitives passed their whole suite on the 68040, which is strong evidence but not the same thing as
-RatChat's own record layer doing so. Nor was the whole `make -f Makefile.openstep test` suite reported as
-run on the real machines this time, only the benchmark and the app; treat those as `[V]` until they are.
+**m68k (68040), partly tested**: the slice launches and connects. The full 68040 run is still in
+progress, and the report did not say whether the suite was run there or whether the connection used TLS,
+so neither is claimed. StepSSH's identical primitives passed their whole suite on the 68040, which is
+strong evidence but not the same thing as RatChat's own record layer doing so; those stay `[V]`.
 
 ## Architecture notes
 
