@@ -280,11 +280,11 @@ gcc 2.7.2's m68k miscompile of a 64-bit arithmetic right shift by exactly 16 (Ra
 `make bench-bulk` (`make -f Makefile.openstep bench-bulk` on OPENSTEP) times ChaCha20, Poly1305,
 whole TLS records through `tls_chacha_seal`/`open` and `tls_gcm_seal`/`open` (64 B, 1400 B and 16 KB),
 the hashes, HMAC-SHA256 and X25519 -- so a change can be compared before and after on the same
-machine. Only the host's figures are known so far, and a modern compiler already optimizes some of the
-old code, so they understate the gain on the real machines: a 16 KB AES-128-GCM record seals in 72 us
-instead of 875 us (about 12x), SHA-1 runs at 743 instead of 451 MB/s, a 64-byte HMAC-SHA256 takes 0.8 us
-instead of 1.2, `ssh_wipe` of 16 KB 0.1 us instead of 4.2, and ChaCha20-Poly1305 records are unchanged
-at about 23 us for 16 KB.
+machine. The host's figures are below; a modern compiler already optimizes some of the old code, so
+they understate the gain on the real machines (see the hardware note at the end of this section). On
+the host a 16 KB AES-128-GCM record seals in 72 us instead of 875 us (about 12x), SHA-1 runs at 743
+instead of 451 MB/s, a 64-byte HMAC-SHA256 takes 0.8 us instead of 1.2, `ssh_wipe` of 16 KB 0.1 us
+instead of 4.2, and ChaCha20-Poly1305 records are unchanged at about 23 us for 16 KB.
 
 **Verified on the development Mac**: all 15 test binaries pass (10640 checks) plainly and under
 ASan+UBSan (`make SAN=1 test`); the GCM rewrite is checked against an independent bit-serial GHASH
@@ -296,10 +296,14 @@ against a real `openssl s_server` with both `ECDHE-RSA-AES128-GCM-SHA256` and
 `ECDHE-RSA-CHACHA20-POLY1305`. The per-architecture build flags and the three-pass fat build were
 checked by dry run with a faked `arch(1)`.
 
-**Not yet verified on real hardware**: the ported code and the per-architecture flags have not been
-built or run on the i386, the 68040 or SPARC, and no `bench-bulk` figures from them exist. StepSSH's
-identical primitives passed its whole suite on all three, which is strong evidence but not the same
-thing as RatChat's own record layer doing so. Treat this section as `[V]` until then.
+**Confirmed on real OPENSTEP 4.2 hardware** (2026-09-30, as reported by the person who ran it): on the
+i386 and on SPARC, `bench-bulk` gives results similar to StepSSH's for the same primitives, and the app
+works just as well as it did before the port. No figures were recorded here.
+
+**Not yet fully tested**: the m68k (68040) slice, which is still being tested. StepSSH's identical
+primitives passed their whole suite on the 68040, which is strong evidence but not the same thing as
+RatChat's own record layer doing so. Nor was the whole `make -f Makefile.openstep test` suite reported as
+run on the real machines this time, only the benchmark and the app; treat those as `[V]` until they are.
 
 ## Architecture notes
 
