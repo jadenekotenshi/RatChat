@@ -2,11 +2,11 @@
 #define SSH_AES_H
 #include "ssh_types.h"
 
-/* AES-128/256 with CTR mode (encrypt-only key schedule; CTR needs no decrypt).
- * Byte-oriented, small, and not cache-timing hardened -- adequate for a
- * client on a 1990s workstation; prefer chacha20-poly1305 where offered. */
+/* AES-128/192/256, table-driven (see aes.c), with CTR mode.  Not cache-timing hardened --
+ * adequate for a client on a 1990s workstation; prefer chacha20-poly1305 where offered. */
 typedef struct {
-    u32 rk[60];
+    u32 rk[60];      /* encryption round keys */
+    u32 drk[60];     /* decryption round keys (equivalent inverse cipher), for CBC */
     int rounds;
     u8 ctr[16];      /* big-endian counter block, incremented per block */
     u8 ks[16];       /* current keystream block */

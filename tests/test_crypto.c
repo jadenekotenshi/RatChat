@@ -10,6 +10,7 @@
 #include "../core/md5.h"
 #include "test.h"
 #include "vectors.h"
+#include "poly_edge_vectors.h"
 
 /* Vendored (and trimmed) from StepSSH's tests/test_crypto.c: covers exactly the primitives
  * RatChat's TLS work vendored into core/ (see the TLS plan's Phase 0) -- sha2/sha1/md5, hmac,
@@ -220,6 +221,10 @@ static void test_chacha(void)
         poly1305_auth(mac, msg, poly_lens[i], poly_key2);
         CHECK_MEM(mac, poly_exp2[i], 16, "poly1305");
     }
+    for (i = 0; i < N_POLYE; i++) {            /* carry and final-reduction edge cases (see poly_edge_vectors.h) */
+        poly1305_auth(mac, polye_msg[i], (size_t)polye_len[i], polye_key[i]);
+        CHECK_MEM(mac, polye_exp[i], 16, "poly1305 edge case");
+    }
 
     chachapoly_init(&cp, cp_key);
     chachapoly_seal(&cp, CP_SEQ, sealed, cp_plain, cp_plain_LEN - 4);
@@ -233,6 +238,148 @@ static void test_chacha(void)
     CHECK(chachapoly_open(&cp, CP_SEQ, opened, sealed, 29) == -1);
     sealed[40] ^= 0x80;
     CHECK(chachapoly_open(&cp, CP_SEQ + 1, opened, sealed, 29) == -1);   /* wrong seq */
+}
+
+/* AES-CTR must not care how the data is chunked or where it sits in memory: the 32-bit XOR fast path
+ * (all pointers 4-byte aligned) and the byte path, in place or not, at every alignment, in awkward
+ * chunk sizes that split keystream blocks, must all equal one aligned one-shot call. */
+static void test_ctr_shapes(void)
+{
+    static const int cuts[] = { 1, 15, 16, 17, 31, 5, 64, 3, 48 };
+    u32 store_a[70], store_b[70];
+    u8 key[32], iv[16], ref[200], plain[200];
+    aes_ctr_ctx c;
+    int off, pos, n, ncut, inplace;
+
+    pattern(key, 32, 21); pattern(iv, 16, 33); pattern(plain, 200, 4);
+    aes_ctr_init(&c, key, 32, iv);
+    aes_ctr_xor(&c, plain, ref, 200);
+    for (off = 0; off < 4; off++) {                       /* off == 0 is 4-byte aligned, the rest are not */
+        for (inplace = 0; inplace < 2; inplace++) {
+            u8 *in = (u8 *)store_a + off, *out = inplace ? in : (u8 *)store_b + off;
+            memcpy(in, plain, 200);
+            aes_ctr_init(&c, key, 32, iv);
+            pos = 0; ncut = 0;
+            while (pos < 200) {
+                n = cuts[ncut++ % 9];
+                if (n > 200 - pos) n = 200 - pos;
+                aes_ctr_xor(&c, in + pos, out + pos, (size_t)n);
+                pos += n;
+            }
+            CHECK_MEM(out, ref, 200, inplace ? "aes-ctr chunked in place == one-shot" : "aes-ctr chunked == one-shot");
+        }
+    }
+}
+
+/* Incremental hashing must equal one-shot however the input is split, at every length across several
+ * block boundaries -- the one-shot digests are checked against independent vectors above, so this pins
+ * the buffering in each update() (a partly filled block topped up, whole blocks taken from the input,
+ * the remainder buffered). */
+static void test_hash_chunking(void)
+{
+    static const size_t chunks[] = { 1, 7, 63, 64, 65, 100 };
+    u8 msg[300], one[64], many[64];
+    size_t len, off, n;
+    int k;
+
+#define HASH_CHUNKS(CTXT, INIT, UPDATE, FINAL, DLEN, NAME) do { \
+        CTXT hc_; \
+        INIT(&hc_); UPDATE(&hc_, msg, len); FINAL(&hc_, one); \
+        for (k = 0; k < 6; k++) { \
+            INIT(&hc_); \
+            for (off = 0; off < len; off += n) { \
+                n = chunks[k]; if (n > len - off) n = len - off; \
+                UPDATE(&hc_, msg + off, n); \
+            } \
+            FINAL(&hc_, many); \
+            CHECK_MEM(many, one, DLEN, NAME " chunked == one-shot"); \
+        } } while (0)
+
+    pattern(msg, 300, 41);
+    for (len = 0; len <= 260; len++) {
+        HASH_CHUNKS(sha1_ctx,   sha1_init,   sha1_update,   sha1_final,   20, "sha1");
+        HASH_CHUNKS(sha256_ctx, sha256_init, sha256_update, sha256_final, 32, "sha256");
+        HASH_CHUNKS(sha512_ctx, sha512_init, sha512_update, sha512_final, 64, "sha512");
+        HASH_CHUNKS(md5_ctx,    md5_init,    md5_update,    md5_final,    16, "md5");
+    }
+#undef HASH_CHUNKS
+}
+
+/* chacha_xor's fast path (native 32-bit words: little-endian CPU, both buffers 4-byte aligned) and its
+ * generic path must give the same bytes, in place or not, at every alignment.  Calls are chunked at
+ * multiples of 64 (each call starts a fresh block), the last one partial. */
+static void test_chacha_shapes(void)
+{
+    static const size_t cuts[] = { 64, 128, 64, 192, 64 };
+    u32 store_a[104], store_b[104];               /* 400 bytes at up to 3 bytes' misalignment */
+    u8 key[32], iv[8], ref[400], plain[400];
+    chacha_ctx c;
+    int off, inplace, ncut;
+    size_t pos, n;
+
+    pattern(key, 32, 61); pattern(iv, 8, 62); pattern(plain, 400, 63);
+    chacha_keysetup(&c, key); chacha_ivsetup(&c, iv, 5);
+    chacha_xor(&c, plain, ref, 400);                     /* 6 full blocks and 16 bytes over */
+    for (off = 0; off < 4; off++) {
+        for (inplace = 0; inplace < 2; inplace++) {
+            u8 *in = (u8 *)store_a + off, *out = inplace ? in : (u8 *)store_b + off;
+            memcpy(in, plain, 400);
+            chacha_keysetup(&c, key); chacha_ivsetup(&c, iv, 5);
+            pos = 0; ncut = 0;
+            while (pos < 400) {
+                n = ncut < 5 ? cuts[ncut++] : 400;
+                if (n > 400 - pos) n = 400 - pos;
+                chacha_xor(&c, in + pos, out + pos, n);
+                pos += n;
+            }
+            CHECK_MEM(out, ref, 400, inplace ? "chacha20 chunked in place == one-shot" : "chacha20 chunked == one-shot");
+        }
+    }
+}
+
+/* chachapoly_peek_length caches the last header it decrypted, and chachapoly_open reuses it: none of
+ * that may change any result, and a cache entry must never be served for a different packet. */
+static void test_chachapoly_peek(void)
+{
+    chachapoly_ctx c, fresh;
+    u8 plain[4 + 40], sealed[4 + 40 + 16], out[4 + 40], inpl[4 + 40 + 16], other[4 + 40 + 16];
+    u32 len;
+
+    chachapoly_init(&c, cp_key);
+    chachapoly_init(&fresh, cp_key);
+    pattern(plain + 4, 40, 71);
+    STORE32_BE(plain, 40);
+    chachapoly_seal(&c, CP_SEQ, sealed, plain, 40);
+
+    len = chachapoly_peek_length(&c, CP_SEQ, sealed);
+    CHECK(len == 40);
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, sealed) == 40);                 /* asked again: same answer */
+    CHECK(chachapoly_open(&c, CP_SEQ, out, sealed, 40) == 0);                /* open after a peek (cache hit) */
+    CHECK_MEM(out, plain, 44, "chachapoly open after peek");
+    CHECK(chachapoly_open(&fresh, CP_SEQ, out, sealed, 40) == 0);            /* open with no peek at all */
+    CHECK_MEM(out, plain, 44, "chachapoly open without peek");
+    memcpy(inpl, sealed, sizeof(sealed));                                     /* in place (tag included), after a peek */
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, inpl) == 40);
+    CHECK(chachapoly_open(&c, CP_SEQ, inpl, inpl, 40) == 0);
+    CHECK_MEM(inpl, plain, 44, "chachapoly open in place after peek");
+
+    /* the same sequence number with a different header must not be served from the cache */
+    STORE32_BE(other, 0x11223344UL);
+    memcpy(other + 4, sealed + 4, 40 + 16);
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, sealed) == 40);
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, other) == chachapoly_peek_length(&fresh, CP_SEQ, other));
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, sealed) == 40);                 /* and back again */
+    /* a different sequence number likewise */
+    CHECK(chachapoly_peek_length(&c, CP_SEQ + 1, sealed) == chachapoly_peek_length(&fresh, CP_SEQ + 1, sealed));
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, sealed) == 40);
+
+    /* a failed open must not poison the next one */
+    sealed[20] ^= 1;
+    CHECK(chachapoly_peek_length(&c, CP_SEQ, sealed) == 40);
+    CHECK(chachapoly_open(&c, CP_SEQ, out, sealed, 40) == -1);
+    sealed[20] ^= 1;
+    CHECK(chachapoly_open(&c, CP_SEQ, out, sealed, 40) == 0);
+    CHECK_MEM(out, plain, 44, "chachapoly open after a failed open");
 }
 
 static void test_x25519(void)
@@ -299,6 +446,8 @@ static void test_rng(void)
 int main(void)
 {
     test_sha(); test_hmac(); test_sha1(); test_aes(); test_aes_blocks(); test_cbc_chain();
-    test_chacha(); test_x25519(); test_ed25519(); test_rng();
+    test_ctr_shapes(); test_hash_chunking();
+    test_chacha(); test_chacha_shapes(); test_chachapoly_peek();
+    test_x25519(); test_ed25519(); test_rng();
     TEST_DONE("crypto");
 }

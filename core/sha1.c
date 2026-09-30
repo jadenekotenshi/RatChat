@@ -1,25 +1,31 @@
 #include <string.h>
 #include "sha1.h"
 
+/* The four groups of 20 rounds differ only in the boolean function and the constant; each round is
+ * written on renamed variables (the roles of a..e rotate every round) so nothing is shuffled. */
+#define F1(b, c, d) (((b) & (c)) | (~(b) & (d)))
+#define F2(b, c, d) ((b) ^ (c) ^ (d))
+#define F3(b, c, d) (((b) & (c)) | ((b) & (d)) | ((c) & (d)))
+#define SHA1_RND(f, k, a, b, c, d, e, i) do { \
+    (e) += ROL32(a, 5) + f(b, c, d) + (k) + w[i]; (b) = ROL32(b, 30); } while (0)
+#define SHA1_5(f, k, i) do { \
+    SHA1_RND(f, k, a, b, cc, d, e, i);     SHA1_RND(f, k, e, a, b, cc, d, (i) + 1); \
+    SHA1_RND(f, k, d, e, a, b, cc, (i) + 2); SHA1_RND(f, k, cc, d, e, a, b, (i) + 3); \
+    SHA1_RND(f, k, b, cc, d, e, a, (i) + 4); } while (0)
+
 static void sha1_block(sha1_ctx *c, const u8 *p)
 {
-    u32 w[80], a, b, cc, d, e, f, k, t;
+    u32 w[80], a, b, cc, d, e;
     int i;
 
     for (i = 0; i < 16; i++) w[i] = LOAD32_BE(p + 4 * i);
     for (i = 16; i < 80; i++) w[i] = ROL32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
     a = c->h[0]; b = c->h[1]; cc = c->h[2]; d = c->h[3]; e = c->h[4];
-    for (i = 0; i < 80; i++) {
-        if (i < 20)      { f = (b & cc) | (~b & d);            k = 0x5a827999UL; }
-        else if (i < 40) { f = b ^ cc ^ d;                     k = 0x6ed9eba1UL; }
-        else if (i < 60) { f = (b & cc) | (b & d) | (cc & d);  k = 0x8f1bbcdcUL; }
-        else             { f = b ^ cc ^ d;                     k = 0xca62c1d6UL; }
-        t = (ROL32(a, 5) + f + e + k + w[i]) & 0xffffffffUL;
-        e = d; d = cc; cc = ROL32(b, 30); b = a; a = t;
-    }
-    c->h[0] = (c->h[0] + a) & 0xffffffffUL; c->h[1] = (c->h[1] + b) & 0xffffffffUL;
-    c->h[2] = (c->h[2] + cc) & 0xffffffffUL; c->h[3] = (c->h[3] + d) & 0xffffffffUL;
-    c->h[4] = (c->h[4] + e) & 0xffffffffUL;
+    for (i = 0; i < 20; i += 5) SHA1_5(F1, 0x5a827999UL, i);
+    for (i = 20; i < 40; i += 5) SHA1_5(F2, 0x6ed9eba1UL, i);
+    for (i = 40; i < 60; i += 5) SHA1_5(F3, 0x8f1bbcdcUL, i);
+    for (i = 60; i < 80; i += 5) SHA1_5(F2, 0xca62c1d6UL, i);
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d; c->h[4] += e;
 }
 
 void sha1_init(sha1_ctx *c)
@@ -33,24 +39,33 @@ void sha1_update(sha1_ctx *c, const void *data, size_t len)
 {
     const u8 *p = (const u8 *)data;
     c->len += len;
-    while (len) {
+    if (c->n) {                                    /* top up a partly filled buffer first */
         size_t take = 64 - c->n;
         if (take > len) take = len;
         memcpy(c->buf + c->n, p, take);
         c->n += (u32)take; p += take; len -= take;
-        if (c->n == 64) { sha1_block(c, c->buf); c->n = 0; }
+        if (c->n < 64) return;
+        sha1_block(c, c->buf);
+        c->n = 0;
     }
+    while (len >= 64) { sha1_block(c, p); p += 64; len -= 64; }      /* whole blocks straight from the input */
+    if (len) { memcpy(c->buf, p, len); c->n = (u32)len; }
 }
 
 void sha1_final(sha1_ctx *c, u8 out[20])
 {
     u64 bits = c->len * 8;
-    u8 pad = 0x80, zero = 0, lenb[8];
     int i;
-    sha1_update(c, &pad, 1);
-    while (c->n != 56) sha1_update(c, &zero, 1);
-    STORE64_BE(lenb, bits);
-    sha1_update(c, lenb, 8);
+
+    c->buf[c->n++] = 0x80;
+    if (c->n > 56) {
+        memset(c->buf + c->n, 0, 64 - c->n);
+        sha1_block(c, c->buf);
+        c->n = 0;
+    }
+    memset(c->buf + c->n, 0, 56 - c->n);
+    STORE64_BE(c->buf + 56, bits);
+    sha1_block(c, c->buf);
     for (i = 0; i < 5; i++) STORE32_BE(out + 4 * i, c->h[i]);
     ssh_wipe(c, sizeof(*c));
 }

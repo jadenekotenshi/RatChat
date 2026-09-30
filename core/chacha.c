@@ -3,11 +3,16 @@
 
 /* ------------------------------ ChaCha20 ------------------------------ */
 
-#define QR(a, b, c, d) \
-    a += b; d ^= a; d = ROL32(d, 16); \
-    c += d; b ^= c; b = ROL32(b, 12); \
-    a += b; d ^= a; d = ROL32(d, 8);  \
-    c += d; b ^= c; b = ROL32(b, 7);
+/* One quarter round.  The four words are loaded into locals, worked on there and stored back, so a
+ * compiler can keep them in registers for the twelve operations instead of going through the x[]
+ * array in memory for every += ^= and rotate. */
+#define QR(x, a, b, c, d) do { \
+    u32 qa = x[a], qb = x[b], qc = x[c], qd = x[d]; \
+    qa += qb; qd ^= qa; qd = ROL32(qd, 16); \
+    qc += qd; qb ^= qc; qb = ROL32(qb, 12); \
+    qa += qb; qd ^= qa; qd = ROL32(qd, 8);  \
+    qc += qd; qb ^= qc; qb = ROL32(qb, 7);  \
+    x[a] = qa; x[b] = qb; x[c] = qc; x[d] = qd; } while (0)
 
 void chacha_keysetup(chacha_ctx *c, const u8 key[32])
 {
@@ -26,35 +31,54 @@ void chacha_ivsetup(chacha_ctx *c, const u8 iv[8], u64 counter)
     c->s[15] = LOAD32_LE(iv + 4);
 }
 
-static void chacha_block(const chacha_ctx *c, u8 out[64])
+/* x = the keystream block for c's current state: twenty rounds, then the state added back in. */
+static void chacha_core(const chacha_ctx *c, u32 x[16])
 {
-    u32 x[16];
     int i;
-    memcpy(x, c->s, sizeof(x));
+    memcpy(x, c->s, 16 * sizeof(u32));
     for (i = 0; i < 10; i++) {
-        QR(x[0], x[4], x[8],  x[12]) QR(x[1], x[5], x[9],  x[13])
-        QR(x[2], x[6], x[10], x[14]) QR(x[3], x[7], x[11], x[15])
-        QR(x[0], x[5], x[10], x[15]) QR(x[1], x[6], x[11], x[12])
-        QR(x[2], x[7], x[8],  x[13]) QR(x[3], x[4], x[9],  x[14])
+        QR(x, 0, 4, 8,  12); QR(x, 1, 5, 9,  13); QR(x, 2, 6, 10, 14); QR(x, 3, 7, 11, 15);
+        QR(x, 0, 5, 10, 15); QR(x, 1, 6, 11, 12); QR(x, 2, 7, 8,  13); QR(x, 3, 4, 9,  14);
     }
-    for (i = 0; i < 16; i++) {
-        u32 v = x[i] + c->s[i];
-        STORE32_LE(out + 4 * i, v);
-    }
+    for (i = 0; i < 16; i++) x[i] += c->s[i];
 }
 
+static int little_endian(void)
+{
+    u32 one = 1;
+    return *(u8 *)&one == 1;
+}
+
+/* Whole blocks are XORed straight from the block words into the output: as native 32-bit words when
+ * this CPU is little-endian (the keystream is little-endian words) and both buffers are 4-byte
+ * aligned, otherwise through LOAD32_LE/STORE32_LE.  in and out may be the same buffer. */
 void chacha_xor(chacha_ctx *c, const u8 *in, u8 *out, size_t len)
 {
+    u32 x[16];
     u8 ks[64];
     size_t i, n;
-    while (len) {
-        chacha_block(c, ks);
+    int fast = little_endian() && (((size_t)in | (size_t)out) & 3) == 0;
+
+    while (len >= 64) {
+        chacha_core(c, x);
         if (++c->s[12] == 0) c->s[13]++;
-        n = len < 64 ? len : 64;
-        for (i = 0; i < n; i++) out[i] = (u8)(in[i] ^ ks[i]);
-        in += n; out += n; len -= n;
+        if (fast) {
+            const u32 *a = (const u32 *)in;
+            u32 *o = (u32 *)out;
+            for (i = 0; i < 16; i++) o[i] = a[i] ^ x[i];
+        } else {
+            for (i = 0; i < 16; i++) { u32 v = x[i] ^ LOAD32_LE(in + 4 * i); STORE32_LE(out + 4 * i, v); }
+        }
+        in += 64; out += 64; len -= 64;
+    }
+    if (len) {                                     /* the last partial block: through a byte buffer */
+        chacha_core(c, x);
+        if (++c->s[12] == 0) c->s[13]++;
+        for (i = 0; i < 16; i++) STORE32_LE(ks + 4 * i, x[i]);
+        for (n = 0; n < len; n++) out[n] = (u8)(in[n] ^ ks[n]);
     }
     ssh_wipe(ks, sizeof(ks));
+    ssh_wipe(x, sizeof(x));
 }
 
 /* ------------------------------ Poly1305 ------------------------------ */
@@ -164,6 +188,7 @@ void chachapoly_init(chachapoly_ctx *c, const u8 key[CHACHAPOLY_KEYLEN])
 {
     chacha_keysetup(&c->main, key);
     chacha_keysetup(&c->header, key + 32);
+    c->peek_valid = 0;
 }
 
 static void seq_iv(u32 seq, u8 iv[8])
@@ -172,12 +197,28 @@ static void seq_iv(u32 seq, u8 iv[8])
     STORE32_BE(iv + 4, seq);
 }
 
-u32 chachapoly_peek_length(chachapoly_ctx *c, u32 seq, const u8 enc_len[4])
+/* The header key's keystream for one packet, applied to its 4 length bytes: served from the cache
+ * when this exact packet (sequence number and encrypted bytes) was the last one decrypted. */
+static void header_plain(chachapoly_ctx *c, u32 seq, const u8 enc[4], u8 plain[4])
 {
-    u8 iv[8], plain[4];
+    u8 iv[8];
+    if (c->peek_valid && c->peek_seq == seq && memcmp(c->peek_enc, enc, 4) == 0) {
+        memcpy(plain, c->peek_plain, 4);
+        return;
+    }
     seq_iv(seq, iv);
     chacha_ivsetup(&c->header, iv, 0);
-    chacha_xor(&c->header, enc_len, plain, 4);
+    chacha_xor(&c->header, enc, plain, 4);
+    c->peek_seq = seq;
+    memcpy(c->peek_enc, enc, 4);
+    memcpy(c->peek_plain, plain, 4);
+    c->peek_valid = 1;
+}
+
+u32 chachapoly_peek_length(chachapoly_ctx *c, u32 seq, const u8 enc_len[4])
+{
+    u8 plain[4];
+    header_plain(c, seq, enc_len, plain);
     return LOAD32_BE(plain);
 }
 
@@ -211,8 +252,12 @@ int chachapoly_open(chachapoly_ctx *c, u32 seq, u8 *dst, const u8 *src, size_t l
     ssh_wipe(polykey, sizeof(polykey));
     if (bad) return -1;
 
-    chacha_ivsetup(&c->header, iv, 0);
-    chacha_xor(&c->header, src, dst, CHACHAPOLY_AADLEN);
+    {
+        u8 hdr[4];
+        header_plain(c, seq, src, hdr);              /* a cache hit when the caller peeked this packet */
+        c->peek_valid = 0;                           /* one use per packet: the next has a new sequence number */
+        memcpy(dst, hdr, CHACHAPOLY_AADLEN);
+    }
     chacha_ivsetup(&c->main, iv, 1);
     chacha_xor(&c->main, src + CHACHAPOLY_AADLEN, dst + CHACHAPOLY_AADLEN, len);
     return 0;

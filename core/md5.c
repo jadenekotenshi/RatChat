@@ -49,12 +49,17 @@ void md5_update(md5_ctx *c, const void *data, size_t len)
 void md5_final(md5_ctx *c, u8 out[16])
 {
     u64 bits = c->len * 8;
-    u8 pad = 0x80, zero = 0, lenb[8];
     int i;
-    md5_update(c, &pad, 1);
-    while (c->n != 56) md5_update(c, &zero, 1);
-    for (i = 0; i < 8; i++) lenb[i] = (u8)(bits >> (8 * i));         /* length is little-endian */
-    md5_update(c, lenb, 8);
+
+    c->buf[c->n++] = 0x80;
+    if (c->n > 56) {
+        memset(c->buf + c->n, 0, 64 - c->n);
+        md5_block(c, c->buf);
+        c->n = 0;
+    }
+    memset(c->buf + c->n, 0, 56 - c->n);
+    for (i = 0; i < 8; i++) c->buf[56 + i] = (u8)(bits >> (8 * i));         /* length is little-endian */
+    md5_block(c, c->buf);
     for (i = 0; i < 4; i++) STORE32_LE(out + 4 * i, c->h[i]);
     ssh_wipe(c, sizeof(*c));
 }
