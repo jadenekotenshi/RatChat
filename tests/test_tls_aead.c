@@ -133,6 +133,105 @@ static void test_roundtrip_sizes(void)
     }
 }
 
+/* ---- differential test: tls_gcm against a reference built from the ORIGINAL bit-by-bit GHASH ----
+ *
+ * tls_gcm's GHASH multiplies by H a nibble at a time through tables derived at init (see
+ * tls_aead_gcm.c).  The real captured vectors above are small (one record of at most 64 bytes), so this
+ * pins it against NIST SP 800-38D's own bit-by-bit algorithm -- the code the tables replaced, kept here
+ * as an independent oracle -- across both key sizes, many sequence numbers, and AAD and payload lengths
+ * that straddle every block boundary. */
+
+static void ref_gf_mult(const u8 x[16], const u8 y[16], u8 out[16])
+{
+    u8 z[16], v[16];
+    int i, j, k, lsb;
+    memset(z, 0, 16);
+    memcpy(v, y, 16);
+    for (i = 0; i < 16; i++) {
+        for (j = 7; j >= 0; j--) {
+            if (x[i] & (1 << j)) for (k = 0; k < 16; k++) z[k] ^= v[k];
+            lsb = v[15] & 1;
+            for (k = 15; k > 0; k--) v[k] = (u8)((v[k] >> 1) | ((v[k - 1] & 1) << 7));
+            v[0] = (u8)(v[0] >> 1);
+            if (lsb) v[0] ^= 0xe1;
+        }
+    }
+    memcpy(out, z, 16);
+}
+
+static void ref_ghash_feed(u8 y[16], const u8 h[16], const u8 *d, size_t len)
+{
+    u8 blk[16];
+    size_t off, n, i;
+    for (off = 0; off < len; off += 16) {
+        n = len - off < 16 ? len - off : 16;
+        memset(blk, 0, 16);
+        memcpy(blk, d + off, n);
+        for (i = 0; i < 16; i++) blk[i] ^= y[i];
+        ref_gf_mult(blk, h, y);
+    }
+}
+
+/* out = ciphertext || tag, straight from SP 800-38D with a 96-bit IV (fixed(4) || seq(8)) */
+static void ref_gcm_seal(const u8 *key, int keylen, const u8 fixed[4], u64 seq,
+                         const u8 *aad, size_t aad_len, const u8 *in, u8 *out, size_t len)
+{
+    aes_ctr_ctx a;
+    u8 zero[16], h[16], j0[16], cb[16], ks[16], y[16], lb[16], e[16];
+    size_t off, n, i;
+    memset(zero, 0, 16);
+    aes_ctr_init(&a, key, keylen, zero);
+    aes_encrypt_block(&a, zero, h);
+    memcpy(j0, fixed, 4);
+    STORE64_BE(j0 + 4, seq);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+    memcpy(cb, j0, 16);
+    for (off = 0; off < len; off += 16) {
+        n = len - off < 16 ? len - off : 16;
+        STORE32_BE(cb + 12, LOAD32_BE(cb + 12) + 1);
+        aes_encrypt_block(&a, cb, ks);
+        for (i = 0; i < n; i++) out[off + i] = (u8)(in[off + i] ^ ks[i]);
+    }
+    memset(y, 0, 16);
+    ref_ghash_feed(y, h, aad, aad_len);
+    ref_ghash_feed(y, h, out, len);
+    STORE64_BE(lb, (u64)aad_len * 8);
+    STORE64_BE(lb + 8, (u64)len * 8);
+    ref_ghash_feed(y, h, lb, 16);
+    aes_encrypt_block(&a, j0, e);
+    for (i = 0; i < 16; i++) out[len + i] = (u8)(e[i] ^ y[i]);
+}
+
+static void test_gcm_vs_reference(void)
+{
+    static const size_t lens[] = { 0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 64, 100, 255, 256, 1000, 1400 };
+    static const size_t aads[] = { 0, 1, 13, 16, 17, 32 };
+    static const int keylens[2] = { 16, 32 };
+    u8 key[32], fixed[4], aad[40], in[1500], want[1500 + 16], got[1500 + 16], back[1500];
+    tls_gcm_ctx c;
+    u32 st = 0x2545f491UL;
+    int ki, li, ai;
+    size_t i;
+    u64 seq;
+
+    for (ki = 0; ki < 2; ki++)
+        for (li = 0; li < (int)(sizeof(lens) / sizeof(lens[0])); li++)
+            for (ai = 0; ai < (int)(sizeof(aads) / sizeof(aads[0])); ai++) {
+                for (i = 0; i < 32; i++) { st = st * 1664525UL + 1013904223UL; key[i] = (u8)(st >> 16); }
+                for (i = 0; i < 4; i++) { st = st * 1664525UL + 1013904223UL; fixed[i] = (u8)(st >> 16); }
+                for (i = 0; i < sizeof(aad); i++) { st = st * 1664525UL + 1013904223UL; aad[i] = (u8)(st >> 16); }
+                for (i = 0; i < lens[li]; i++) { st = st * 1664525UL + 1013904223UL; in[i] = (u8)(st >> 16); }
+                st = st * 1664525UL + 1013904223UL;
+                seq = ((u64)st << 20) ^ (u64)(li * 7 + ai);
+                tls_gcm_init(&c, key, keylens[ki], fixed);
+                ref_gcm_seal(key, keylens[ki], fixed, seq, aad, aads[ai], in, want, lens[li]);
+                tls_gcm_seal(&c, seq, aad, aads[ai], in, got, lens[li]);
+                CHECK_MEM(got, want, lens[li] + TLS_GCM_TAG_LEN, "tls_gcm_seal matches the bit-serial reference");
+                CHECK(tls_gcm_open(&c, seq, aad, aads[ai], got, back, lens[li]) == 0);
+                CHECK_MEM(back, in, lens[li], "tls_gcm_open recovers the plaintext");
+            }
+}
+
 int main(void)
 {
     test_chacha_rfc8439();
@@ -146,5 +245,6 @@ int main(void)
                      cc_server_ct, cc_server_tag, cc_server_pt, cc_server_pt_LEN, "chacha server Finished");
     test_tamper_detection();
     test_roundtrip_sizes();
+    test_gcm_vs_reference();
     TEST_DONE("tls_aead");
 }

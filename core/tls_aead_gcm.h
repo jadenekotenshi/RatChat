@@ -31,6 +31,8 @@
 typedef struct {
     aes_ctr_ctx aes;                        /* round keys only; its own ctr/ks fields are unused */
     u8 h[16];                                /* GHASH subkey, AES_K(0^128) */
+    u32 ht[16][4];                           /* multiply-by-H tables, one 128-bit entry per 4-bit value (tls_aead_gcm.c) */
+    u32 last4[16];                           /* what shifting a 4-bit remainder out of the bottom adds back at the top */
     u8 fixed_iv[TLS_GCM_FIXED_IV_LEN];
 } tls_gcm_ctx;
 
