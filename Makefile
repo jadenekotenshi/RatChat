@@ -5,6 +5,13 @@ CC      ?= cc
 CFLAGS  = -std=c89 -pedantic -Wall -Wextra -Wdeclaration-after-statement \
           -Wno-long-long -Wno-unused-parameter -O2 -g -Icore
 BUILD   = build
+SANFLAGS =
+# make SAN=1 test   -- build everything with AddressSanitizer + UBSan in build-san/
+ifdef SAN
+SANFLAGS = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+CFLAGS  += $(SANFLAGS)
+BUILD   = build-san
+endif
 
 TERM_SRC = $(wildcard term/*.c)
 TERM_OBJ = $(patsubst term/%.c,$(BUILD)/term_%.o,$(TERM_SRC))
@@ -66,6 +73,14 @@ $(BUILD)/test_tls_pins: tests/test_tls_pins.c $(CORE_OBJ)
 
 $(BUILD)/test_prims: tests/test_prims.c tests/prims_ref.h core/nacl.c $(CORE_OBJ)
 	$(CC) $(CFLAGS) tests/test_prims.c $(CORE_OBJ) -o $@
+
+# Per-primitive cost of the TLS data path (record ciphers, hashes, HMAC, X25519) for before/after comparisons on
+# the real machines; strict flags because it also has to build under Makefile.openstep's gcc 2.7.2.
+$(BUILD)/bench_bulk: tools/bench_bulk.c $(CORE_OBJ)
+	$(CC) $(CFLAGS) tools/bench_bulk.c $(CORE_OBJ) -o $@
+
+bench-bulk: $(BUILD)/bench_bulk
+	$(BUILD)/bench_bulk
 
 test: $(BUILD)/test_prims $(BUILD)/test_vt $(BUILD)/test_irc_parse $(BUILD)/test_dcc \
       $(BUILD)/test_crypto $(BUILD)/test_bignum $(BUILD)/test_ecc $(BUILD)/test_rsa $(BUILD)/test_der \
@@ -155,7 +170,7 @@ entropy-gate-smoke:
 	build/entropy_gate_smoke
 
 clean:
-	rm -rf build
+	rm -rf build build-san
 
 # Drives a real tls_session, as a real TCP client, through a full TLS 1.2 handshake against a
 # REAL local `openssl s_server` (a temporary self-signed cert generated fresh each run) -- see
@@ -185,4 +200,4 @@ irc-tls-smoke:
 	$(CC) build/its_*.o -framework Cocoa -o build/irc_tls_smoke
 	build/irc_tls_smoke 15901 build/irc_tls_smoke.pem build/irc_tls_smoke.key build/irc_tls_pins.txt
 
-.PHONY: all test lint check-objc dist irc-smoke dcc-smoke tls-smoke irc-tls-smoke entropy-gate-smoke clean
+.PHONY: all test bench-bulk lint check-objc dist irc-smoke dcc-smoke tls-smoke irc-tls-smoke entropy-gate-smoke clean

@@ -28,6 +28,16 @@ OPT      = -O
 DEFS     = -DOPENSTEP
 ARCHS    =                        # e.g. -arch i386 -arch m68k -arch sparc; see `fat` below
 CFLAGS   = $(OPT) -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore
+# Per-architecture tuning, ported from StepSSH (where each was benched on real hardware): a 68040 does
+# better at -O2 -fomit-frame-pointer -m68040 than plain $(OPT); SPARC needs -mv8 (OPENSTEP only ever ran
+# on the sun4m SPARCstations, every one of them V8) to get the hardware integer multiply instead of gcc
+# 2.7.2's default V7 code's library calls, and does better at -O2; and core/chacha.c alone does better at
+# plain -O there (ChaCha20 76.7 -> about 99 MB/s, a whole 32 KB chacha20-poly1305 seal 745 -> 426 us --
+# Poly1305 lives in the same file). x86 gets -m486, added by the .c.o rule below. Each set replaces $(OPT).
+M68KOPT        = -O2 -fomit-frame-pointer -m68040
+M68KCFLAGS     = $(M68KOPT) -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore
+SPARCOPT       = -O2 -mv8
+SPARCCHACHAOPT = -O -mv8
 LIBS     = -framework AppKit -framework Foundation
 APP      = RatChat.app
 VERSION  = 0.2.1
@@ -52,11 +62,32 @@ APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IR
 
 .SUFFIXES: .c .m .o
 
+# -m486, M68KOPT and SPARCOPT are single-architecture gcc switch sets the other backends reject, so each
+# is only added for a genuine thin build of its own architecture: no -arch override in play (empty
+# ARCHS) and `arch(1)` reporting that exact architecture. A `fat` build shares one CFLAGS across every
+# `-arch` in a single cc invocation and NeXT's cc has no per-arch flag scoping, so `fat-build` below
+# compiles each architecture as its own pass instead. The SPARC branch matches both a thin build
+# ("-sparc") and the fat build's sparc pass ("-arch sparc-<the building machine>") and picks core/chacha.c's
+# own SPARCCHACHAOPT.
 .c.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+	@case "$(ARCHS)-`arch`" in \
+	    -i386) echo $(CC) $(CFLAGS) -m486 -c $< -o $@; $(CC) $(CFLAGS) -m486 -c $< -o $@ ;; \
+	    -m68k) echo $(CC) $(M68KCFLAGS) -c $< -o $@; $(CC) $(M68KCFLAGS) -c $< -o $@ ;; \
+	    -sparc|"-arch sparc-"*) o="$(SPARCOPT)"; [ "$<" = core/chacha.c ] && o="$(SPARCCHACHAOPT)"; \
+	        echo $(CC) $$o -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore -c $< -o $@; \
+	        $(CC) $$o -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore -c $< -o $@ ;; \
+	    *) echo $(CC) $(CFLAGS) -c $< -o $@; $(CC) $(CFLAGS) -c $< -o $@ ;; \
+	esac
 
 .m.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+	@case "$(ARCHS)-`arch`" in \
+	    -i386) echo $(CC) $(CFLAGS) -m486 -c $< -o $@; $(CC) $(CFLAGS) -m486 -c $< -o $@ ;; \
+	    -m68k) echo $(CC) $(M68KCFLAGS) -c $< -o $@; $(CC) $(M68KCFLAGS) -c $< -o $@ ;; \
+	    -sparc|"-arch sparc-"*) o="$(SPARCOPT)"; \
+	        echo $(CC) $$o -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore -c $< -o $@; \
+	        $(CC) $$o -Wall $(DEFS) $(ARCHS) -Iterm -Iapp -Icore -c $< -o $@ ;; \
+	    *) echo $(CC) $(CFLAGS) -c $< -o $@; $(CC) $(CFLAGS) -c $< -o $@ ;; \
+	esac
 
 all: $(APP)/RatChat
 
@@ -156,6 +187,15 @@ test: build/test_prims build/test_vt build/test_irc_parse build/test_dcc \
 	build/test_tls
 	build/test_tls_pins
 
+# Per-primitive cost of the TLS data path (record ciphers, hashes, HMAC, X25519), for comparing before and
+# after a change on the same machine.
+build/bench_bulk: tools/bench_bulk.c $(CORE_OBJS)
+	-mkdir build
+	$(CC) $(CFLAGS) -o build/bench_bulk tools/bench_bulk.c $(CORE_OBJS)
+
+bench-bulk: build/bench_bulk
+	build/bench_bulk
+
 # ---- install ----
 # OPENSTEP's own conventions: /LocalApps for a locally-built application (parallel to /NextApps
 # for vendor-shipped ones). Needs write access (root, typically); if mkdir/cp fails for that
@@ -168,8 +208,7 @@ install: all
 	cp -r $(APP) $(APPDIR)/
 	@echo "installed: $(APPDIR)/$(APP)"
 
-install-fat: clean
-	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
+install-fat: fat-build
 	-mkdir $(APPDIR)
 	rm -rf $(APPDIR)/$(APP)
 	cp -r $(APP) $(APPDIR)/
@@ -215,8 +254,7 @@ pkg-assemble:
 
 pkg: all pkg-assemble
 
-pkg-fat: clean
-	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
+pkg-fat: fat-build
 	$(MAKE) -f Makefile.openstep pkg-assemble
 
 # ---- distributable archive of the .pkg ----
@@ -247,8 +285,19 @@ dist-fat: pkg-fat
 #
 #   make -f Makefile.openstep fat-check    # fast: does cc even accept these -arch flags here?
 #   make -f Makefile.openstep fat          # full: RatChat.app as an i386+m68k+sparc fat binary
-#   make -f Makefile.openstep fat FATARCHS="-arch i386 -arch m68k"   # a different arch set
-FATARCHS = -arch i386 -arch m68k -arch sparc
+#
+# Built as three separate passes, not one multi-`-arch` cc invocation: -m486, M68KOPT and SPARCOPT (see the
+# .c.o:/.m.o: rules above) each measurably help on their own architecture but are single-architecture gcc
+# switch sets the other backends reject, and NeXT's cc has no per-arch flag scoping (no -Xarch_i386 the way
+# Apple's later toolchain gained). So `fat-build` compiles each architecture on its own with its own tuning
+# and `lipo -create`s the three finished binaries together (StepSSH's fat build works the same way, and was
+# confirmed on real hardware there). Each group must be a real -arch list (an empty one would turn its pass
+# into a native thin build), so to build fewer architectures edit fat-build itself.
+FATARCHS_X86   = -arch i386
+FATARCHS_M68K  = -arch m68k
+FATARCHS_SPARC = -arch sparc
+FATARCHS       = $(FATARCHS_X86) $(FATARCHS_M68K) $(FATARCHS_SPARC)
+FATSTAGE       = fatstage
 
 fat-check:
 	@echo "int main(void) { return 0; }" > /tmp/ratchat_fatcheck.c
@@ -257,9 +306,25 @@ fat-check:
 	lipo -info /tmp/ratchat_fatcheck.o
 	@rm -f /tmp/ratchat_fatcheck.c /tmp/ratchat_fatcheck.o
 
-fat: clean
-	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS)"
-	@echo "== fat link done; architectures actually present in $(APP)/RatChat: =="
+# Shared three-pass build behind fat/install-fat/pkg-fat: builds the app once per architecture (x86 with -m486
+# folded into OPT, m68k with OPT replaced by M68KOPT, sparc with OPT replaced by SPARCOPT), staging the first
+# two passes' executables aside in $(FATSTAGE) (cleaning between each), then lipo-merges them with the sparc one.
+fat-build:
+	rm -rf $(FATSTAGE)
+	mkdir $(FATSTAGE)
+	$(MAKE) -f Makefile.openstep clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS_X86)" OPT="$(OPT) -m486"
+	cp $(APP)/RatChat $(FATSTAGE)/RatChat-x86
+	$(MAKE) -f Makefile.openstep clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS_M68K)" OPT="$(M68KOPT)"
+	cp $(APP)/RatChat $(FATSTAGE)/RatChat-m68k
+	$(MAKE) -f Makefile.openstep clean
+	$(MAKE) -f Makefile.openstep all ARCHS="$(FATARCHS_SPARC)" OPT="$(SPARCOPT)"
+	lipo -create $(FATSTAGE)/RatChat-x86 $(FATSTAGE)/RatChat-m68k $(APP)/RatChat -output $(APP)/RatChat
+	rm -rf $(FATSTAGE)
+
+fat: fat-build
+	@echo "== fat build done (i386 pass used -m486, m68k pass used M68KOPT, sparc pass used SPARCOPT); architectures actually present in $(APP)/RatChat: =="
 	lipo -info $(APP)/RatChat
 
 clean:
