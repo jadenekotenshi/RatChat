@@ -83,7 +83,8 @@ etc.).
   (prefix/command/param parsing, trailing-param edge cases, CTCP, and every outgoing command
   formatter), 30 checks for `core/dcc.c` (DCC SEND request parsing including quoted filenames,
   the classic decimal IP encoding both ways, and every formatter, all round-tripped), and just
-  over 3400 more across every TLS-related module: the vendored crypto primitives against
+  over 9900 more across every TLS-related module (plus 301 for the compiler's own 64-bit
+  arithmetic, `tests/test_prims.c`): the vendored crypto primitives against
   StepSSH's own already-hardware-confirmed results; `core/der.c`/`core/x509.c` against three real
   openssl-generated certificates (RSA-2048, EC-P256, EC-P384), every value cross-checked
   independently via openssl's own tools, plus full truncation/corruption sweeps; `core/tls_prf.c`
@@ -229,6 +230,7 @@ make tls-smoke      # a real TLS 1.2 handshake, end to end, against a real local
 make irc-tls-smoke  # the same, but through the actual app-layer TLS wiring
 make entropy-gate-smoke  # confirms TLS (and only TLS) gates on the RNG pool being seeded
 make lint check-objc     # style/portability checks
+make bench-bulk         # per-primitive cost of the TLS data path (host figures are only a smoke test)
 ```
 
 ```sh
@@ -241,12 +243,63 @@ make -f Makefile.openstep fat          # RatChat.app as an i386+m68k+sparc fat b
 make -f Makefile.openstep install-fat  # fat app into /LocalApps
 make -f Makefile.openstep pkg-fat      # RatChat.pkg with the fat build
 make -f Makefile.openstep dist-fat     # fat RatChat.pkg, gzipped as RatChat-<VERSION>-NIS.tar.gz
+make -f Makefile.openstep bench-bulk   # per-primitive cost of the TLS data path, on the machine you run it on
 ```
+
+`fat`/`install-fat`/`pkg-fat`/`dist-fat` all go through one shared `fat-build` target, which `clean`s
+first (so a fat build never links against thin object files left over from a plain build). It
+compiles the three architectures as three separate passes and `lipo -create`s the results, rather
+than as one multi-`-arch` `cc` invocation, so each architecture gets its own tuning, ported from
+StepSSH where each was benched on real hardware: `-m486` for i386, `-O2 -fomit-frame-pointer
+-m68040` (`M68KOPT`) for m68k, and `-O2 -mv8` (`SPARCOPT`) for SPARC -- except `core/chacha.c`, which
+alone builds at `-O -mv8` there (`SPARCCHACHAOPT`; Poly1305 lives in the same file). `-mv8` uses the
+hardware integer multiply instead of gcc 2.7.2's default V7 code's library calls; it is safe because
+OPENSTEP only ran on the sun4m SPARCstations, every one of them V8. Each is a set of
+single-architecture gcc switches the other backends reject, and NeXT's `cc` cannot scope a flag to
+one `-arch` inside a single invocation. A plain (thin) build picks the same flags automatically when
+`arch(1)` reports i386, m68k or sparc.
 
 See `Makefile.openstep`'s own comments for exactly what each one assumes and why, carried over
 directly from what StepSSH's own packaging saga established (the real `Installer.app/package`
 tool, the plain-text `.info` format, `LongFileNames NO`, `chgrp nogroup`, the `N`/`I`/`S`/`NIS`
 `dist` naming) rather than re-derived from nothing.
+
+## Bulk throughput
+
+RatChat vendors StepSSH's crypto, and StepSSH's throughput pass (2026-09-29) has been ported across
+unchanged in substance: `core/aes.c`/`aes_tab.h` (32-bit-word AES with one 1 KB table each way),
+`core/chacha.c` (quarter rounds on locals, XOR fused into the block and done as aligned 32-bit words
+on little-endian CPUs), `core/sha1.c`/`sha2.c`/`md5.c` (unrolled rounds, one-`memset` padding,
+`ssh_wipe` as a `memset` through a volatile pointer), and RatChat's own `core/tls_aead_gcm.c`, whose
+GHASH went from bit-serial to 4-bit tables (Shoup's method, with the tables derived from the spec's
+multiply-by-x so there is no separate constant table to get wrong). On StepSSH, as reported by the
+person who ran them on real hardware, throughput on the i386 was significantly higher, on the 68040
+AES-256-CTR improved by approximately 450% and chacha20-poly1305 by more than 3x. `core/nacl.c` already carried the fix for
+gcc 2.7.2's m68k miscompile of a 64-bit arithmetic right shift by exactly 16 (RatChat 0.2.1).
+
+`make bench-bulk` (`make -f Makefile.openstep bench-bulk` on OPENSTEP) times ChaCha20, Poly1305,
+whole TLS records through `tls_chacha_seal`/`open` and `tls_gcm_seal`/`open` (64 B, 1400 B and 16 KB),
+the hashes, HMAC-SHA256 and X25519 -- so a change can be compared before and after on the same
+machine. Only the host's figures are known so far, and a modern compiler already optimizes some of the
+old code, so they understate the gain on the real machines: a 16 KB AES-128-GCM record seals in 72 us
+instead of 875 us (about 12x), SHA-1 runs at 743 instead of 451 MB/s, a 64-byte HMAC-SHA256 takes 0.8 us
+instead of 1.2, `ssh_wipe` of 16 KB 0.1 us instead of 4.2, and ChaCha20-Poly1305 records are unchanged
+at about 23 us for 16 KB.
+
+**Verified on the development Mac**: all 15 test binaries pass (10640 checks) plainly and under
+ASan+UBSan (`make SAN=1 test`); the GCM rewrite is checked against an independent bit-serial GHASH
+across two key sizes, 16 payload lengths and 6 AAD lengths (a deliberately corrupted table entry fails
+197 of them); the ChaCha and AES changes are checked for every buffer alignment and chunking, and
+Poly1305 against 44 edge-case vectors from an independent Python big-integer implementation;
+`make tls-smoke` and `make irc-tls-smoke` still complete real TLS 1.2 handshakes and record exchange
+against a real `openssl s_server` with both `ECDHE-RSA-AES128-GCM-SHA256` and
+`ECDHE-RSA-CHACHA20-POLY1305`. The per-architecture build flags and the three-pass fat build were
+checked by dry run with a faked `arch(1)`.
+
+**Not yet verified on real hardware**: the ported code and the per-architecture flags have not been
+built or run on the i386, the 68040 or SPARC, and no `bench-bulk` figures from them exist. StepSSH's
+identical primitives passed its whole suite on all three, which is strong evidence but not the same
+thing as RatChat's own record layer doing so. Treat this section as `[V]` until then.
 
 ## Architecture notes
 
