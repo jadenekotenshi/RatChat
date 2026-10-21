@@ -308,6 +308,35 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
            ((unsigned)(c->attr & (VT_BOLD | VT_UNDERLINE | VT_DIM)) << 18);
 }
 
+/* Line-drawing and block characters, painted as rectangles on the cell grid: the fonts have no glyphs for them, and
+ * this way neighbouring cells always join up. */
+- (void)drawShape:(unsigned)cp inRect:(NSRect)r color:(NSColor *)fg background:(NSColor *)bg
+{
+    int arms = vt_box_arms((vt_u16)cp), kind = vt_block_kind((vt_u16)cp);
+    float cx = r.origin.x + (float)ifloor(r.size.width / 2.0);
+    float cy = r.origin.y + (float)ifloor(r.size.height / 2.0);
+    float x1 = r.origin.x + r.size.width, y1 = r.origin.y + r.size.height;
+
+    if (arms) {
+        [fg set];
+        if (arms & VT_ARM_L) NSRectFill(NSMakeRect(r.origin.x, cy, cx + 1.0 - r.origin.x, 1.0));
+        if (arms & VT_ARM_R) NSRectFill(NSMakeRect(cx, cy, x1 - cx, 1.0));
+        if (arms & VT_ARM_D) NSRectFill(NSMakeRect(cx, r.origin.y, 1.0, cy + 1.0 - r.origin.y));
+        if (arms & VT_ARM_U) NSRectFill(NSMakeRect(cx, cy, 1.0, y1 - cy));
+        return;
+    }
+    switch (kind) {
+    case VT_BLOCK_FULL:  [fg set]; NSRectFill(r); break;
+    case VT_BLOCK_UPPER: [fg set]; NSRectFill(NSMakeRect(r.origin.x, cy, r.size.width, y1 - cy)); break;
+    case VT_BLOCK_LOWER: [fg set]; NSRectFill(NSMakeRect(r.origin.x, r.origin.y, r.size.width, cy - r.origin.y)); break;
+    case VT_BLOCK_LEFT:  [fg set]; NSRectFill(NSMakeRect(r.origin.x, r.origin.y, cx - r.origin.x, r.size.height)); break;
+    case VT_BLOCK_RIGHT: [fg set]; NSRectFill(NSMakeRect(cx, r.origin.y, x1 - cx, r.size.height)); break;
+    case VT_BLOCK_SHADE25: [[bg blendedColorWithFraction:0.25 ofColor:fg] set]; NSRectFill(r); break;
+    case VT_BLOCK_SHADE50: [[bg blendedColorWithFraction:0.5 ofColor:fg] set]; NSRectFill(r); break;
+    case VT_BLOCK_SHADE75: [[bg blendedColorWithFraction:0.75 ofColor:fg] set]; NSRectFill(r); break;
+    }
+}
+
 - (void)drawRow:(int)r cursor:(BOOL)withCursor fromCol:(int)c0 toCol:(int)c1
 {
     int w = 0, c, e, n, i, fgc, bgc, fgc2, bgc2, line = r - scrollBack;
@@ -317,7 +346,7 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
     unsigned key, key2;
     vt_cell blank;
     char buf[300];
-    BOOL anyText;
+    BOOL anyText, anyShape;
     NSColor *fg;
 
     blank.ch = ' '; blank.fg = 0; blank.bg = 0; blank.attr = VT_DEFFG | VT_DEFBG;
@@ -342,9 +371,11 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
         NSRectFill(NSMakeRect(x, y, n * cellW + (e == cols ? MARGIN : 0.0), cellH));
 
         anyText = NO;
+        anyShape = NO;
         for (i = 0; i < n && i < (int)sizeof(buf) - 1; i++) {
             const vt_cell *cl = (cells && c + i < w) ? &cells[c + i] : &blank;
             int b = nsenc_encode(cl->ch);
+            if (vt_box_arms(cl->ch) || vt_block_kind(cl->ch)) { b = ' '; anyShape = YES; }      /* painted below */
             if (b < 0) b = nsenc_encode(vt_fallback_char(cl->ch));
             if (b < 0) b = '?';
             if (b == 0) b = ' ';
@@ -365,6 +396,14 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
             if ((key >> 18) & VT_BOLD) {                     /* overstrike: works with any font */
                 PSmoveto(x + 1.0, y + baseline);
                 PSshow(buf);
+            }
+        }
+        if (anyShape) {
+            for (i = 0; i < n; i++) {
+                const vt_cell *cl = (cells && c + i < w) ? &cells[c + i] : &blank;
+                if (vt_box_arms(cl->ch) || vt_block_kind(cl->ch))
+                    [self drawShape:cl->ch inRect:NSMakeRect(x + i * cellW, y, cellW, cellH)
+                              color:fg background:[self colorForCode:bgc]];
             }
         }
         if ((key >> 18) & VT_UNDERLINE) {

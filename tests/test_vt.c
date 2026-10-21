@@ -209,6 +209,22 @@ static void test_utf8_charsets(void)
     CHECK(cell(t, 0, 0).ch == 0x250c && cell(t, 0, 1).ch == 0x2500 && cell(t, 0, 2).ch == 0x2510);
     CHECK(cell(t, 0, 3).ch == 'q');
     CHECK(vt_fallback_char(0x250c) == '+' && vt_fallback_char(0x2500) == '-' && vt_fallback_char(0x2502) == '|');
+    CHECK(vt_box_arms(0x2500) == (VT_ARM_L | VT_ARM_R) && vt_box_arms(0x2502) == (VT_ARM_U | VT_ARM_D));      /* shapes the view paints */
+    CHECK(vt_box_arms(0x250c) == (VT_ARM_R | VT_ARM_D) && vt_box_arms(0x2510) == (VT_ARM_L | VT_ARM_D));
+    CHECK(vt_box_arms(0x2514) == (VT_ARM_R | VT_ARM_U) && vt_box_arms(0x2518) == (VT_ARM_L | VT_ARM_U));
+    CHECK(vt_box_arms(0x251c) == (VT_ARM_U | VT_ARM_D | VT_ARM_R) && vt_box_arms(0x2524) == (VT_ARM_U | VT_ARM_D | VT_ARM_L));
+    CHECK(vt_box_arms(0x252c) == (VT_ARM_L | VT_ARM_R | VT_ARM_D) && vt_box_arms(0x2534) == (VT_ARM_L | VT_ARM_R | VT_ARM_U));
+    CHECK(vt_box_arms(0x253c) == 15 && vt_box_arms(0x254b) == 15 && vt_box_arms(0x254c) == (VT_ARM_L | VT_ARM_R));
+    CHECK(vt_box_arms(0x2550) == (VT_ARM_L | VT_ARM_R) && vt_box_arms(0x2554) == (VT_ARM_R | VT_ARM_D) && vt_box_arms(0x256c) == 15);
+    CHECK(vt_box_arms(0x256d) == (VT_ARM_R | VT_ARM_D) && vt_box_arms(0x2570) == (VT_ARM_R | VT_ARM_U));
+    CHECK(vt_box_arms(0x2571) == 0 && vt_box_arms(0x2574) == VT_ARM_L && vt_box_arms(0x257b) == VT_ARM_D && vt_box_arms(0x257f) == (VT_ARM_U | VT_ARM_D));
+    CHECK(vt_box_arms(0x24ff) == 0 && vt_box_arms(0x2580) == 0 && vt_box_arms('q') == 0);
+    CHECK(vt_block_kind(0x2588) == VT_BLOCK_FULL && vt_block_kind(0x2592) == VT_BLOCK_SHADE50 && vt_block_kind(0x2500) == VT_BLOCK_NONE);
+    feed(t, "\033[2J\033[H\033(0lqkxmjtuvwn\033(B");           /* every DEC line character is one the view can draw */
+    {
+        int k;
+        for (k = 0; k < 11; k++) CHECK(vt_box_arms(cell(t, 0, k).ch) != 0);
+    }
     feed(t, "\033[2J\033[H\033)0\016q\017q");               /* SO/SI with G1 = graphics */
     CHECK(cell(t, 0, 0).ch == 0x2500 && cell(t, 0, 1).ch == 'q');
     vt_free(t);

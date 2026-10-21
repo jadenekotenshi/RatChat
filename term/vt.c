@@ -1036,3 +1036,47 @@ vt_u16 vt_fallback_char(vt_u16 cp)
     default: return cp < 0x100 ? cp : '?';
     }
 }
+
+/* U+2500..U+257F by shape: H LR, V UD, a RD, b LD, c RU, d LU, e UDR, f UDL, g LRD, h LRU, i all four, j L, k U, l R, m D.
+ * Heavy, double and dashed variants share the light shape; the rounded corners are square. */
+static const char BOX_SHAPES[] =
+    "HHVV" "HHVVHHVV" "aaaa" "bbbb" "cccc" "dddd" "eeeeeeee" "ffffffff" "gggggggg" "hhhhhhhh" "iiiiiiiiiiiiiiii" "HHVV"
+    "HV" "aaa" "bbb" "ccc" "ddd" "eee" "fff" "ggg" "hhh" "iii" "abdc" "   " "jklm" "jklm" "HVHV";
+
+int vt_box_arms(vt_u16 cp)
+{
+    if (cp < 0x2500 || cp > 0x257f) return 0;
+    switch (BOX_SHAPES[cp - 0x2500]) {
+    case 'H': return VT_ARM_L | VT_ARM_R;
+    case 'V': return VT_ARM_U | VT_ARM_D;
+    case 'a': return VT_ARM_R | VT_ARM_D;
+    case 'b': return VT_ARM_L | VT_ARM_D;
+    case 'c': return VT_ARM_R | VT_ARM_U;
+    case 'd': return VT_ARM_L | VT_ARM_U;
+    case 'e': return VT_ARM_U | VT_ARM_D | VT_ARM_R;
+    case 'f': return VT_ARM_U | VT_ARM_D | VT_ARM_L;
+    case 'g': return VT_ARM_L | VT_ARM_R | VT_ARM_D;
+    case 'h': return VT_ARM_L | VT_ARM_R | VT_ARM_U;
+    case 'i': return VT_ARM_L | VT_ARM_R | VT_ARM_U | VT_ARM_D;
+    case 'j': return VT_ARM_L;
+    case 'k': return VT_ARM_U;
+    case 'l': return VT_ARM_R;
+    case 'm': return VT_ARM_D;
+    default: return 0;
+    }
+}
+
+int vt_block_kind(vt_u16 cp)
+{
+    switch (cp) {
+    case 0x2588: return VT_BLOCK_FULL;
+    case 0x2580: return VT_BLOCK_UPPER;
+    case 0x2584: return VT_BLOCK_LOWER;
+    case 0x258c: return VT_BLOCK_LEFT;
+    case 0x2590: return VT_BLOCK_RIGHT;
+    case 0x2591: return VT_BLOCK_SHADE25;
+    case 0x2592: return VT_BLOCK_SHADE50;
+    case 0x2593: return VT_BLOCK_SHADE75;
+    default: return VT_BLOCK_NONE;
+    }
+}

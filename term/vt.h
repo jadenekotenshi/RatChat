@@ -140,6 +140,18 @@ int  vt_encode_mouse(const vt *t, int button, int col, int row, int mods, int mo
 
 /* Display helpers */
 vt_u16 vt_fallback_char(vt_u16 cp);     /* map box drawing/graphics to plain ASCII */
+/* Line-drawing characters the view paints itself, because the NeXT fonts have no such glyphs.  vt_box_arms()
+ * returns which arms of a U+2500..U+257F box-drawing character reach the cell's edges (VT_ARM_* ORed; 0 if cp is not
+ * one we draw -- the diagonals, say); vt_block_fill() gives the fraction of a block/shade character U+2580..U+2593
+ * that is painted, as a code: see VT_BLOCK_*. */
+#define VT_ARM_L 1
+#define VT_ARM_R 2
+#define VT_ARM_U 4
+#define VT_ARM_D 8
+int vt_box_arms(vt_u16 cp);
+enum { VT_BLOCK_NONE = 0, VT_BLOCK_FULL, VT_BLOCK_UPPER, VT_BLOCK_LOWER, VT_BLOCK_LEFT, VT_BLOCK_RIGHT,
+       VT_BLOCK_SHADE25, VT_BLOCK_SHADE50, VT_BLOCK_SHADE75 };
+int vt_block_kind(vt_u16 cp);
 void   vt_palette_rgb(int index, vt_u8 *r, vt_u8 *g, vt_u8 *b);
 
 #endif
