@@ -4,7 +4,7 @@
  * Pure C89, no I/O, no AppKit: feed it bytes formatted for display with
  * vt_write(), read the screen through vt_cell()/vt_line_at(), and collect
  * anything it wants to say back to the host (DSR/DA replies) with
- * vt_take_output().  Rows that changed since the last vt_clear_dirty() are
+ * vt_take_output().  Rows that changed since the last vt_clear_dirty() (and, within each, the span of columns that changed) are
  * flagged so a slow machine can redraw only what it must.
  */
 #ifndef VT_H
@@ -45,6 +45,7 @@ typedef struct vt {
     vt_cell **main_line, **alt_line;
     int in_alt;
     vt_u8 *dirty;              /* per visible row */
+    int *dirty_x0, *dirty_x1;  /* per visible row, valid where dirty[row]: the columns [x0, x1) that changed */
     int all_dirty;
 
     int cx, cy;                /* cursor, 0-based */

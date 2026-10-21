@@ -3,6 +3,7 @@
 #include "nsenc.h"
 #include <string.h>
 
+#define DEFAULT_MAX_FPS 20.0                 /* redraws a second at most, unless TerminalMaxFPS says otherwise */
 #define MARGIN 3.0
 
 /* floor/ceil without <math.h>: an undeclared floor() would be assumed to return int and
@@ -15,11 +16,13 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 @interface TerminalView (Private)
 - (NSColor *)colorForCode:(int)code;
 - (NSRect)rectForRow:(int)r;
-- (void)drawRow:(int)r cursor:(BOOL)withCursor;
+- (void)drawRow:(int)r cursor:(BOOL)withCursor fromCol:(int)c0 toCol:(int)c1;
 - (void)pointToCell:(NSPoint)p line:(int *)line col:(int *)col;
 - (BOOL)cellIsSelectedLine:(int)line col:(int)col;
 - (void)syncScroller;
 - (void)markDirty;
+- (void)flushTimerFired:(NSTimer *)timer;
+- (NSRect)rectForRow:(int)r from:(int)c0 to:(int)c1;
 - (void)sendString:(NSString *)s;
 - (void)escTimeout:(NSTimer *)timer;
 - (BOOL)reportMouseLine:(int)line col:(int)col button:(int)button flags:(unsigned)flags
@@ -53,6 +56,14 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
     deleteSendsBackspace = 0;
     altSendsEscape = 1;
     lastSb = 0;
+    {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        float fps = ([d objectForKey:@"TerminalMaxFPS"] != nil) ? [d floatForKey:@"TerminalMaxFPS"] : DEFAULT_MAX_FPS;
+
+        minFlushInterval = (fps > 0.0) ? 1.0 / fps : 0.0;
+        confirmPaste = ([d objectForKey:@"TerminalConfirmPaste"] == nil) ? YES : [d boolForKey:@"TerminalConfirmPaste"];
+    }
+    pasteAnswer = -1;
     [self fitToFrame];
     return self;
 }
@@ -61,6 +72,7 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 {
     int i;
     [escTimer invalidate];
+    [flushTimer invalidate];
     vt_free(term);
     [font release];
     [defaultFg release];
@@ -92,6 +104,15 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 
 /* ---------------------------------------------------------------- */
 /* geometry */
+
+- (NSRect)rectForRow:(int)r from:(int)c0 to:(int)c1
+{
+    NSRect rr = [self rectForRow:r];
+    float x0 = (c0 <= 0) ? 0.0 : MARGIN + c0 * cellW;
+    float x1 = (c1 >= cols) ? rr.size.width : MARGIN + c1 * cellW;
+
+    return NSMakeRect(x0, rr.origin.y, x1 - x0, rr.size.height);
+}
 
 - (NSRect)rectForRow:(int)r
 {
@@ -142,21 +163,84 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 /* ---------------------------------------------------------------- */
 /* feeding output from the connection                                      */
 
+/* Hands AppKit what changed since the last flush: for each dirty row only the columns that changed (a column more on
+ * each side, since a bold glyph overstrikes one point to the right and a neighbour's background would otherwise cut it),
+ * and the cell the cursor was in and the one it is in now. */
 - (void)markDirty
 {
-    int r;
+    int r, c0, c1;
+    float area = 0.0;
+    NSRect q;
+
     if (term->all_dirty || scrollBack > 0) {
         [self setNeedsDisplay:YES];
+        area = [self bounds].size.width * [self bounds].size.height;
     } else {
-        for (r = 0; r < rows && r < term->rows; r++)
-            if (term->dirty[r]) [self setNeedsDisplayInRect:[self rectForRow:r]];
-        if (lastCy < rows) [self setNeedsDisplayInRect:[self rectForRow:lastCy]];
-        if (term->cy < rows) [self setNeedsDisplayInRect:[self rectForRow:term->cy]];
+        for (r = 0; r < rows && r < term->rows; r++) {
+            if (!term->dirty[r]) continue;
+            c0 = term->dirty_x0[r] - 1;
+            c1 = term->dirty_x1[r] + 1;
+            q = [self rectForRow:r from:c0 to:c1];
+            [self setNeedsDisplayInRect:q];
+            area += q.size.width * q.size.height;
+        }
+        if (lastCy < rows) {
+            q = [self rectForRow:lastCy from:lastCx - 1 to:lastCx + 2];
+            [self setNeedsDisplayInRect:q];
+            area += q.size.width * q.size.height;
+        }
+        if (term->cy < rows) {
+            q = [self rectForRow:term->cy from:term->cx - 1 to:term->cx + 2];
+            [self setNeedsDisplayInRect:q];
+            area += q.size.width * q.size.height;
+        }
     }
+    lastFlushArea = area;
     lastCx = term->cx;
     lastCy = term->cy;
     vt_clear_dirty(term);
 }
+
+/* A deferred redraw must not depend on whoever feeds the view ticking again (a session's timer stops when its
+ * connection ends), so the view schedules its own one-shot timer for the end of the frame interval. */
+- (void)flushTimerFired:(NSTimer *)timer
+{
+    flushTimer = nil;                              /* a non-repeating NSTimer invalidates itself on firing */
+    [self flushDisplay];
+}
+
+- (void)flushDisplay
+{
+    [flushTimer invalidate];
+    flushTimer = nil;
+    if (!pendingFlush) return;
+    pendingFlush = NO;
+    lastFlush = [NSDate timeIntervalSinceReferenceDate];
+    flushCount++;
+    [self markDirty];
+}
+
+- (void)flushDisplayIfDue
+{
+    if (!pendingFlush) return;
+    if (minFlushInterval > 0.0 && [NSDate timeIntervalSinceReferenceDate] - lastFlush < minFlushInterval) {
+        if (flushTimer == nil) {
+            NSTimeInterval wait = minFlushInterval - ([NSDate timeIntervalSinceReferenceDate] - lastFlush);
+
+            flushTimer = [NSTimer scheduledTimerWithTimeInterval:(wait > 0.001 ? wait : 0.001) target:self
+                                                        selector:@selector(flushTimerFired:) userInfo:nil repeats:NO];
+        }
+        return;
+    }
+    [self flushDisplay];
+}
+
+- (void)setMaxFPS:(float)fps { minFlushInterval = (fps > 0.0) ? 1.0 / fps : 0.0; }
+- (float)maxFPS { return minFlushInterval > 0.0 ? (float)(1.0 / minFlushInterval) : 0.0; }
+- (int)flushCount { return flushCount; }
+- (float)lastFlushArea { return lastFlushArea; }
+- (void)setConfirmsMultilinePaste:(BOOL)flag { confirmPaste = flag; }
+- (void)setPasteAnswer:(int)answer { pasteAnswer = answer; }
 
 - (void)writeBytes:(const unsigned char *)bytes length:(int)n
 {
@@ -176,7 +260,8 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
         [delegate terminalView:self sendBytes:reply length:got];
     if (term->bell) { term->bell = 0; NSBeep(); }
     [self syncScroller];
-    [self markDirty];
+    pendingFlush = YES;
+    [self flushDisplayIfDue];
 }
 
 /* ---------------------------------------------------------------- */
@@ -223,7 +308,7 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
            ((unsigned)(c->attr & (VT_BOLD | VT_UNDERLINE | VT_DIM)) << 18);
 }
 
-- (void)drawRow:(int)r cursor:(BOOL)withCursor
+- (void)drawRow:(int)r cursor:(BOOL)withCursor fromCol:(int)c0 toCol:(int)c1
 {
     int w = 0, c, e, n, i, fgc, bgc, fgc2, bgc2, line = r - scrollBack;
     const vt_cell *cells = vt_line_at(term, line, &w);
@@ -237,13 +322,13 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
 
     blank.ch = ' '; blank.fg = 0; blank.bg = 0; blank.attr = VT_DEFFG | VT_DEFBG;
 
-    for (c = 0; c < cols; ) {
+    for (c = c0; c < c1; ) {
         const vt_cell *cell = (cells && c < w) ? &cells[c] : &blank;
         int inv = [self cellIsSelectedLine:line col:c] ||
                   (withCursor && r == term->cy && c == term->cx);
         key = cell_key(cell, inv, term->reverse_screen, &fgc, &bgc);
 
-        for (e = c + 1; e < cols; e++) {                     /* extend the run */
+        for (e = c + 1; e < c1; e++) {                       /* extend the run */
             const vt_cell *cell2 = (cells && e < w) ? &cells[e] : &blank;
             int inv2 = [self cellIsSelectedLine:line col:e] ||
                        (withCursor && r == term->cy && e == term->cx);
@@ -292,7 +377,7 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
 
 - (void)drawRect:(NSRect)rect
 {
-    int r, first, last;
+    int r, first, last, c0, c1;
     BOOL key = [[self window] isKeyWindow];
     BOOL live = (scrollBack == 0 && term->cursor_visible);
     NSRect b = [self bounds];
@@ -304,7 +389,11 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
     last  = ifloor((NSMaxY(b) - MARGIN - NSMinY(rect)) / cellH);
     if (first < 0) first = 0;
     if (last >= rows) last = rows - 1;
-    for (r = first; r <= last; r++) [self drawRow:r cursor:(live && key)];
+    c0 = ifloor((NSMinX(rect) - MARGIN) / cellW);                /* only the columns the rectangle touches */
+    c1 = iceil((NSMaxX(rect) - MARGIN) / cellW);
+    if (c0 < 0) c0 = 0;
+    if (c1 > cols) c1 = cols;
+    for (r = first; r <= last; r++) [self drawRow:r cursor:(live && key) fromCol:c0 toCol:c1];
 
     if (live && !key) {                                      /* hollow cursor while inactive */
         NSRect cr = NSMakeRect(MARGIN + term->cx * cellW, [self rectForRow:term->cy].origin.y, cellW, cellH);
@@ -673,11 +762,53 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
     [pb setString:s forType:NSStringPboardType];
 }
 
+/* How many lines a paste would send: its line breaks (CR, LF or CRLF), not counting one at the very end, plus one. */
+static int paste_lines(NSString *s)
+{
+    unsigned i, n = [s length];
+    int lines = 1;
+
+    for (i = 0; i < n; i++) {
+        unichar c = [s characterAtIndex:i];
+
+        if (c == '\r' && i + 1 < n && [s characterAtIndex:i + 1] == '\n') i++;       /* CRLF is one break */
+        if ((c == '\r' || c == '\n') && i + 1 < n) lines++;
+    }
+    return lines;
+}
+
+/* Several lines pasted run as commands (or go out as messages) the moment they arrive, so the person is asked first -- unless the
+ * program in the terminal has asked for bracketed paste (it then knows the text came from a paste and holds it back). */
+- (BOOL)confirmPasteOf:(NSString *)s
+{
+    int lines = paste_lines(s);
+    NSMutableString *preview = [NSMutableString string];
+    NSArray *parts;
+    unsigned i;
+
+    if (!confirmPaste || lines < 2 || term->bracketed_paste) return YES;
+    if (pasteAnswer >= 0) return pasteAnswer == 1;
+    parts = [s componentsSeparatedByString:@"\n"];
+    for (i = 0; i < [parts count] && i < 4; i++) {
+        NSString *l = [parts objectAtIndex:i];
+
+        while ([l length] > 0 && ([l characterAtIndex:[l length] - 1] == '\r')) l = [l substringToIndex:[l length] - 1];
+        if ([l length] > 60) l = [[l substringToIndex:57] stringByAppendingString:@"..."];
+        [preview appendString:l];
+        [preview appendString:@"\n"];
+    }
+    if (lines > 4) [preview appendString:@"..."];
+    return NSRunAlertPanel([NSString stringWithFormat:@"Paste %d lines?", lines],
+                           @"Each line is sent as soon as it arrives:\n\n%@", @"Paste", @"Cancel", nil, preview)
+           == NSAlertDefaultReturn;
+}
+
 - (void)paste:(id)sender
 {
     NSString *s = [[NSPasteboard generalPasteboard] stringForType:NSStringPboardType];
     unsigned char esc[8];
     if (!s || [s length] == 0) return;
+    if (![self confirmPasteOf:s]) return;
     if (scrollBack) { scrollBack = 0; [self syncScroller]; [self setNeedsDisplay:YES]; }
     if (term->bracketed_paste) {
         memcpy(esc, "\033[200~", 6);

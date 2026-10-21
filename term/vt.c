@@ -60,9 +60,26 @@ static vt_cell **alloc_screen(int rows, int cols, vt_cell c)
     return s;
 }
 
+/* The columns [a, b) of a row changed: the row's dirty span grows to take them in. */
+static void mark_cols(vt *t, int row, int a, int b)
+{
+    if (row < 0 || row >= t->rows) return;
+    if (a < 0) a = 0;
+    if (b > t->cols) b = t->cols;
+    if (a >= b) return;
+    if (!t->dirty[row]) {
+        t->dirty[row] = 1;
+        t->dirty_x0[row] = a;
+        t->dirty_x1[row] = b;
+    } else {
+        if (a < t->dirty_x0[row]) t->dirty_x0[row] = a;
+        if (b > t->dirty_x1[row]) t->dirty_x1[row] = b;
+    }
+}
+
 static void mark(vt *t, int row)
 {
-    if (row >= 0 && row < t->rows) t->dirty[row] = 1;
+    mark_cols(t, row, 0, t->cols);
 }
 
 static void mark_range(vt *t, int a, int b)
@@ -237,7 +254,7 @@ static void put_cp(vt *t, vt_u32 cp)
     c->fg = t->pen.fg;
     c->bg = t->pen.bg;
     c->attr = t->pen.attr;
-    mark(t, t->cy);
+    mark_cols(t, t->cy, t->cx, t->insert ? t->cols : t->cx + 1);       /* insert mode pushed the rest of the line along */
     if (t->cx == t->cols - 1) t->wrap_pending = t->autowrap ? 1 : 0;
     else t->cx++;
 }
@@ -288,7 +305,7 @@ static void erase_cells(vt *t, int row, int from, int to)   /* [from, to) */
     if (to > t->cols) to = t->cols;
     if (from >= to) return;
     fill(&t->line[row][from], to - from, blank_cell(t));
-    mark(t, row);
+    mark_cols(t, row, from, to);
 }
 
 static void erase_display(vt *t, int mode)
@@ -330,7 +347,7 @@ static void insert_chars(vt *t, int n)
     if (n > t->cols - t->cx) n = t->cols - t->cx;
     memmove(&row[t->cx + n], &row[t->cx], (size_t)(t->cols - t->cx - n) * sizeof(vt_cell));
     fill(&row[t->cx], n, blank_cell(t));
-    mark(t, t->cy);
+    mark_cols(t, t->cy, t->cx, t->cols);
     t->wrap_pending = 0;
 }
 
@@ -340,7 +357,7 @@ static void delete_chars(vt *t, int n)
     if (n > t->cols - t->cx) n = t->cols - t->cx;
     memmove(&row[t->cx], &row[t->cx + n], (size_t)(t->cols - t->cx - n) * sizeof(vt_cell));
     fill(&row[t->cols - n], n, blank_cell(t));
-    mark(t, t->cy);
+    mark_cols(t, t->cy, t->cx, t->cols);
     t->wrap_pending = 0;
 }
 
@@ -773,13 +790,15 @@ vt *vt_new(int cols, int rows, int scrollback_lines)
     t->main_line = alloc_screen(rows, cols, b);
     t->alt_line = alloc_screen(rows, cols, b);
     t->dirty = (vt_u8 *)calloc((size_t)rows, 1);
+    t->dirty_x0 = (int *)calloc((size_t)rows, sizeof(int));
+    t->dirty_x1 = (int *)calloc((size_t)rows, sizeof(int));
     t->tabs = (vt_u8 *)calloc((size_t)cols, 1);
     if (scrollback_lines > 0) {
         t->sb = (vt_cell **)calloc((size_t)scrollback_lines, sizeof(vt_cell *));
         t->sb_w = (int *)calloc((size_t)scrollback_lines, sizeof(int));
         if (t->sb && t->sb_w) t->sb_max = scrollback_lines;
     }
-    if (!t->main_line || !t->alt_line || !t->dirty || !t->tabs) { vt_free(t); return NULL; }
+    if (!t->main_line || !t->alt_line || !t->dirty || !t->dirty_x0 || !t->dirty_x1 || !t->tabs) { vt_free(t); return NULL; }
     t->line = t->main_line;
     vt_reset(t);
     return t;
@@ -792,7 +811,7 @@ void vt_free(vt *t)
     free_rows(t->main_line, t->rows);
     free_rows(t->alt_line, t->rows);
     for (i = 0; i < t->sb_count; i++) free(t->sb[(t->sb_head + i) % t->sb_max]);
-    free(t->sb); free(t->sb_w); free(t->dirty); free(t->tabs);
+    free(t->sb); free(t->sb_w); free(t->dirty); free(t->dirty_x0); free(t->dirty_x1); free(t->tabs);
     free(t);
 }
 
@@ -820,6 +839,7 @@ void vt_resize(vt *t, int cols, int rows)
 {
     vt_cell **nm, **na;
     vt_u8 *nd, *nt;
+    int *nx0, *nx1;
     int drop = 0;
 
     if (cols < 1) cols = 1;
@@ -829,17 +849,19 @@ void vt_resize(vt *t, int cols, int rows)
 
     nd = (vt_u8 *)calloc((size_t)rows, 1);
     nt = (vt_u8 *)calloc((size_t)cols, 1);
-    if (!nd || !nt) { free(nd); free(nt); return; }
+    nx0 = (int *)calloc((size_t)rows, sizeof(int));
+    nx1 = (int *)calloc((size_t)rows, sizeof(int));
+    if (!nd || !nt || !nx0 || !nx1) { free(nd); free(nt); free(nx0); free(nx1); return; }
     nm = resize_screen(t, t->main_line, cols, rows, t->in_alt ? 0 : drop, 1);
     na = resize_screen(t, t->alt_line, cols, rows, t->in_alt ? drop : 0, 0);
-    if (!nm || !na) { free_rows(nm, rows); free_rows(na, rows); free(nd); free(nt); return; }
+    if (!nm || !na) { free_rows(nm, rows); free_rows(na, rows); free(nd); free(nt); free(nx0); free(nx1); return; }
 
     free_rows(t->main_line, t->rows);
     free_rows(t->alt_line, t->rows);
-    free(t->dirty); free(t->tabs);
+    free(t->dirty); free(t->dirty_x0); free(t->dirty_x1); free(t->tabs);
     t->main_line = nm; t->alt_line = na;
     t->line = t->in_alt ? na : nm;
-    t->dirty = nd; t->tabs = nt;
+    t->dirty = nd; t->dirty_x0 = nx0; t->dirty_x1 = nx1; t->tabs = nt;
     t->cols = cols; t->rows = rows;
     init_tabs(t);
     t->cy -= drop;

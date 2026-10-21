@@ -173,6 +173,40 @@ static int wait_for_text(IRCChannelSession *cs, NSString *needle, double timeout
 static int pass, fail;
 #define EXPECT(cond, what) do { if (cond) { pass++; printf("  ok   %s\n", what); } else { fail++; printf("  FAIL %s\n", what); } } while (0)
 
+/* collects what a view sends to its host */
+@interface Sink : NSObject { int total; } - (int)total; @end
+@implementation Sink
+- (void)terminalView:(id)tv sendBytes:(const unsigned char *)bytes length:(int)n { total += n; }
+- (void)terminalView:(id)tv resizedToCols:(int)c rows:(int)r { }
+- (int)total { return total; }
+@end
+
+static void put(TerminalView *tv, const char *s) { [tv writeBytes:(const unsigned char *)s length:(int)strlen(s)]; }
+
+/* pixels of a rectangle of the view, drawn on their own, equal those of the same area of the whole view drawn at once */
+static int partial_matches_full(TerminalView *tv, NSRect part)
+{
+    NSBitmapImageRep *full = [tv bitmapImageRepForCachingDisplayInRect:[tv bounds]];
+    NSBitmapImageRep *piece = [tv bitmapImageRepForCachingDisplayInRect:part];
+    int x, y, ox, oy;
+
+    [tv cacheDisplayInRect:[tv bounds] toBitmapImageRep:full];
+    [tv cacheDisplayInRect:part toBitmapImageRep:piece];
+    if ([piece pixelsWide] != (int)part.size.width || [full pixelsWide] != (int)[tv bounds].size.width) return 1;   /* (scaled screen: skip) */
+    ox = (int)part.origin.x;
+    oy = (int)([tv bounds].size.height - NSMaxY(part));
+    for (y = 0; y < [piece pixelsHigh]; y++) {
+        for (x = 0; x < [piece pixelsWide]; x++) {
+            NSColor *a = [[piece colorAtX:x y:y] colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+            NSColor *b = [[full colorAtX:ox + x y:oy + y] colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+
+            if (fabs([a redComponent] - [b redComponent]) + fabs([a greenComponent] - [b greenComponent]) +
+                fabs([a blueComponent] - [b blueComponent]) > 0.02) return 0;
+        }
+    }
+    return 1;
+}
+
 int main(void)
 {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -182,6 +216,110 @@ int main(void)
     IRCChannelSession *status, *chan;
 
     [NSApplication sharedApplication];
+
+    /* ---- the redraw frame cap, dirty columns and the paste confirmation, on a view of its own ---- */
+    {
+        TerminalView *v = [[TerminalView alloc] initWithFrame:NSMakeRect(0, 0, 640, 400)];
+        Sink *sink = [[Sink alloc] init];
+        int before, i;
+        float full, small;
+        NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 400) styleMask:NSTitledWindowMask
+                                                     backing:NSBackingStoreBuffered defer:NO];
+
+        [[w contentView] addSubview:v];
+        [v setDelegate:sink];
+        [v setMaxFPS:10.0];                                         /* a frame every 100 ms */
+        EXPECT([v maxFPS] > 9.9 && [v maxFPS] < 10.1, "the frame cap is settable");
+        put(v, "a");
+        EXPECT([v flushCount] == 1, "the first output after quiet redraws at once");
+        before = [v flushCount];
+        for (i = 0; i < 200; i++) put(v, "x");
+        [v flushDisplayIfDue];
+        EXPECT([v flushCount] == before, "a burst of output inside one frame interval is not redrawn per write");
+        spin(0.15);
+        [v flushDisplayIfDue];
+        EXPECT([v flushCount] == before + 1, "...but once the interval has passed the pending output is redrawn, once");
+        [v flushDisplayIfDue];
+        EXPECT([v flushCount] == before + 1, "nothing pending, nothing redrawn");
+        /* a deferred redraw happens on its own, with nobody ticking */
+        put(v, "q");
+        put(v, "r");
+        before = [v flushCount];
+        spin(0.25);
+        EXPECT([v flushCount] == before + 1, "output deferred by the cap is redrawn by the view's own timer, without any tick");
+        [v setMaxFPS:0.0];
+        before = [v flushCount];
+        for (i = 0; i < 5; i++) put(v, "y");
+        EXPECT([v flushCount] == before + 5, "with the cap off every write redraws");
+        [v setMaxFPS:10.0];
+        spin(0.15);
+
+        /* dirty columns: one character changing redraws a few cells, not the row */
+        put(v, "\033[2J\033[1;1H");
+        spin(0.15);
+        put(v, "0123456789012345678901234567890123456789012345678901234567890123456789");
+        [v flushDisplay];
+        full = [v lastFlushArea];
+        spin(0.15);
+        put(v, "\033[1;40Hz");
+        [v flushDisplay];
+        small = [v lastFlushArea];
+        EXPECT(small > 0.0 && small * 4.0 < full, "one changed character asks AppKit to redraw a few cells, not the whole row");
+        put(v, "\033[2J");
+        [v flushDisplay];
+        EXPECT([v lastFlushArea] >= [v bounds].size.width * [v bounds].size.height * 0.5, "clearing the screen redraws all of it");
+
+        /* a column-limited redraw paints exactly what the full one does (coloured cells, so there is something to compare) */
+        put(v, "\033[2J\033[1;1H");
+        for (i = 0; i < 6; i++) put(v, "\033[41m  \033[42m  \033[44m  \033[46m  \033[0m AB \033[1;45mCD\033[0m  \n");
+        [v flushDisplay];
+        {
+            NSRect b = [v bounds];
+            NSRect piece = NSMakeRect(60.0, b.size.height - 90.0, 130.0, 40.0);
+
+            EXPECT(partial_matches_full(v, piece), "a redraw limited to some columns paints the same pixels as a full redraw there");
+            piece = NSMakeRect(3.0, b.size.height - 40.0, 40.0, 30.0);
+            EXPECT(partial_matches_full(v, piece), "...also at the left edge");
+        }
+
+        /* pasting several lines asks first (unless the shell takes bracketed paste); one line never does */
+        {
+            NSPasteboard *pb = [NSPasteboard generalPasteboard];
+
+            [pb declareTypes:[NSArray arrayWithObject:NSStringPboardType] owner:nil];
+            [pb setString:@"ls\npwd\n" forType:NSStringPboardType];
+            [v setPasteAnswer:0];
+            before = [sink total];
+            [v paste:nil];
+            EXPECT([sink total] == before, "pasting two lines and answering Cancel sends nothing");
+            [v setPasteAnswer:1];
+            [v paste:nil];
+            EXPECT([sink total] > before, "...and answering Paste sends it");
+            [pb declareTypes:[NSArray arrayWithObject:NSStringPboardType] owner:nil];
+            [pb setString:@"ls\n" forType:NSStringPboardType];
+            [v setPasteAnswer:0];
+            before = [sink total];
+            [v paste:nil];
+            EXPECT([sink total] > before, "a single line (even with its newline) is pasted without asking");
+            [pb declareTypes:[NSArray arrayWithObject:NSStringPboardType] owner:nil];
+            [pb setString:@"a\r\nb\r\nc" forType:NSStringPboardType];
+            before = [sink total];
+            [v paste:nil];
+            EXPECT([sink total] == before, "CRLF lines count as lines");
+            [v setConfirmsMultilinePaste:NO];
+            [v paste:nil];
+            EXPECT([sink total] > before, "the confirmation can be switched off");
+            [v setConfirmsMultilinePaste:YES];
+            [v terminal]->bracketed_paste = 1;
+            before = [sink total];
+            [v paste:nil];
+            EXPECT([sink total] > before, "with bracketed paste on the shell holds the paste back itself, so nothing is asked");
+        }
+        [w release];
+        [sink release];
+        [v release];
+    }
+
     EXPECT(fs_listen(&fs, &port), "a fake IRC server can bind and listen on 127.0.0.1");
 
     ac = [[AppController alloc] init];

@@ -269,6 +269,47 @@ static void test_keys_dirty(void)
     vt_free(t);
 }
 
+/* the dirty span of a row: exactly the columns that changed, growing to take in each further change */
+static void test_dirty_spans(void)
+{
+    vt *t = vt_new(20, 5, 0);
+
+    vt_clear_dirty(t);
+    feed(t, "\033[2;6Hx");                                       /* row 1, column 5 */
+    CHECK(t->dirty[1] && t->dirty_x0[1] == 5 && t->dirty_x1[1] == 6 && !t->dirty[0] && !t->dirty[2]);
+    feed(t, "yz");                                               /* columns 6 and 7 follow */
+    CHECK(t->dirty_x0[1] == 5 && t->dirty_x1[1] == 8);
+    feed(t, "\033[2;2Ha");                                       /* and one far to the left */
+    CHECK(t->dirty_x0[1] == 1 && t->dirty_x1[1] == 8);
+    vt_clear_dirty(t);
+    CHECK(!t->dirty[1]);
+    feed(t, "\033[3;10H\033[K");                                 /* erase to end of line from column 9 */
+    CHECK(t->dirty[2] && t->dirty_x0[2] == 9 && t->dirty_x1[2] == 20);
+    vt_clear_dirty(t);
+    feed(t, "\033[3;4H\033[3P");                                 /* delete 3 characters: from column 3 to the end */
+    CHECK(t->dirty_x0[2] == 3 && t->dirty_x1[2] == 20);
+    vt_clear_dirty(t);
+    feed(t, "\033[3;4H\033[2@");                                 /* insert 2 */
+    CHECK(t->dirty_x0[2] == 3 && t->dirty_x1[2] == 20);
+    vt_clear_dirty(t);
+    feed(t, "\033[4;5H\033[3X");                                 /* erase 3 characters */
+    CHECK(t->dirty_x0[3] == 4 && t->dirty_x1[3] == 7);
+    vt_clear_dirty(t);
+    feed(t, "\033[4;5H\033[4h" "q");                             /* insert mode: the rest of the line moves too */
+    CHECK(t->dirty_x0[3] == 4 && t->dirty_x1[3] == 20);
+    feed(t, "\033[4l");
+    vt_clear_dirty(t);
+    feed(t, "\033[5;1H\n");                                      /* scrolling dirties every row of the region, whole */
+    CHECK(t->dirty[0] && t->dirty_x0[0] == 0 && t->dirty_x1[0] == 20 && t->dirty[4] && t->dirty_x0[4] == 0 && t->dirty_x1[4] == 20);
+    vt_clear_dirty(t);
+    vt_resize(t, 30, 6);                                         /* a resize dirties everything, whole rows */
+    CHECK(t->dirty[5] && t->dirty_x0[5] == 0 && t->dirty_x1[5] == 30 && t->all_dirty);
+    vt_clear_dirty(t);
+    feed(t, "\033[1;30Hx");                                      /* the last column of the new width */
+    CHECK(t->dirty_x0[0] == 29 && t->dirty_x1[0] == 30);
+    vt_free(t);
+}
+
 static void test_mouse(void)
 {
     /* Expected bytes below are computed by hand from the formula verified against real xterm's
@@ -399,6 +440,6 @@ int main(void)
 {
     test_basic(); test_wrap(); test_erase_edit(); test_sgr(); test_scroll();
     test_alt_screen(); test_tabs_modes(); test_replies_title(); test_utf8_charsets();
-    test_nsenc(); test_resize(); test_keys_dirty(); test_mouse(); test_fuzz();
+    test_nsenc(); test_resize(); test_keys_dirty(); test_dirty_spans(); test_mouse(); test_fuzz();
     TEST_DONE("vt");
 }
