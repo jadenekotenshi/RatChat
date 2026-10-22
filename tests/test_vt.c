@@ -3,6 +3,7 @@
 #include <string.h>
 #include "../term/vt.h"
 #include "../term/nsenc.h"
+#include "../term/colours.h"
 #include "test.h"
 
 static void feed(vt *t, const char *s) { vt_write(t, (const unsigned char *)s, strlen(s)); }
@@ -191,6 +192,62 @@ static void test_replies_title(void)
     feed(t, "\007");
     CHECK(t->bell);
     vt_free(t);
+}
+
+static int near(double a, double b) { return a - b < 0.001 && b - a < 0.001; }
+
+static void test_colours(void)
+{
+    double r, g, b;
+
+    /* yellow on white gets darker but stays yellow (red and green equal, no blue) */
+    r = 0.8; g = 0.8; b = 0.0;
+    hk_adjust_for_background(&r, &g, &b, 1.0);
+    CHECK(hk_luminance(r, g, b) <= 0.4201 && r > 0.3 && near(r, g) && near(b, 0.0));
+    /* white and bright white on white become greys that can be read */
+    r = g = b = 1.0;
+    hk_adjust_for_background(&r, &g, &b, 1.0);
+    CHECK(near(r, g) && near(g, b) && near(hk_luminance(r, g, b), 0.42));
+    /* cyan keeps its character */
+    r = 0.0; g = 0.8; b = 0.8;
+    hk_adjust_for_background(&r, &g, &b, 1.0);
+    CHECK(hk_luminance(r, g, b) <= 0.4201 && near(g, b) && near(r, 0.0));
+    /* colours that are dark enough already are not touched on a light background */
+    r = 0.6; g = 0.0; b = 0.0;
+    hk_adjust_for_background(&r, &g, &b, 1.0);
+    CHECK(near(r, 0.6) && near(g, 0.0) && near(b, 0.0));
+    r = 0.0; g = 0.0; b = 0.0;
+    hk_adjust_for_background(&r, &g, &b, 1.0);
+    CHECK(near(r, 0.0) && near(g, 0.0) && near(b, 0.0));
+
+    /* on black, blue is lightened (and still bluest), black becomes dark grey, bright colours are left alone */
+    r = 0.0; g = 0.0; b = 0.8;
+    hk_adjust_for_background(&r, &g, &b, 0.0);
+    CHECK(hk_luminance(r, g, b) >= 0.3999 && b > r && b > g && near(r, g));
+    r = g = b = 0.0;
+    hk_adjust_for_background(&r, &g, &b, 0.0);
+    CHECK(near(r, 0.4) && near(g, 0.4) && near(b, 0.4));
+    r = 1.0; g = 1.0; b = 0.0;
+    hk_adjust_for_background(&r, &g, &b, 0.0);
+    CHECK(near(r, 1.0) && near(g, 1.0) && near(b, 0.0));
+    r = 0.9; g = 0.9; b = 0.9;
+    hk_adjust_for_background(&r, &g, &b, 0.0);
+    CHECK(near(r, 0.9) && near(g, 0.9) && near(b, 0.9));
+
+    /* every one of the 256 palette entries ends up legible on both backgrounds */
+    {
+        int i, bad = 0;
+        for (i = 0; i < 256; i++) {
+            r = (i & 1) ? 1.0 : 0.0; g = (i & 2) ? 1.0 : 0.0; b = (i & 4) ? 1.0 : 0.0;
+            if (i & 8) { r = r * 0.5 + 0.5; g = g * 0.5 + 0.5; b = b * 0.5 + 0.5; }
+            hk_adjust_for_background(&r, &g, &b, 1.0);
+            if (hk_luminance(r, g, b) > 0.4201 || r < 0 || r > 1 || g < 0 || g > 1 || b < 0 || b > 1) bad++;
+            r = (i & 1) ? 1.0 : 0.0; g = (i & 2) ? 1.0 : 0.0; b = (i & 4) ? 1.0 : 0.0;
+            hk_adjust_for_background(&r, &g, &b, 0.0);
+            if (hk_luminance(r, g, b) < 0.3999 || r < 0 || r > 1 || g < 0 || g > 1 || b < 0 || b > 1) bad++;
+        }
+        CHECK(bad == 0);
+    }
 }
 
 static void test_repeat(void)
@@ -472,7 +529,7 @@ static void test_fuzz(void)
 int main(void)
 {
     test_basic(); test_wrap(); test_erase_edit(); test_sgr(); test_scroll();
-    test_alt_screen(); test_tabs_modes(); test_replies_title(); test_utf8_charsets(); test_repeat();
+    test_alt_screen(); test_tabs_modes(); test_replies_title(); test_utf8_charsets(); test_repeat(); test_colours();
     test_nsenc(); test_resize(); test_keys_dirty(); test_dirty_spans(); test_mouse(); test_fuzz();
     TEST_DONE("vt");
 }

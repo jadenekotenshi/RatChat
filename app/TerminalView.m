@@ -1,6 +1,7 @@
 #import "TerminalView.h"
 #import "UIHelpers.h"
 #include "nsenc.h"
+#include "colours.h"
 #include <string.h>
 
 #define DEFAULT_MAX_FPS 20.0                 /* redraws a second at most, unless TerminalMaxFPS says otherwise */
@@ -273,9 +274,13 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
     if (code == CODE_DEFFG) return defaultFg;
     if (code == CODE_DEFBG) return defaultBg;
     if (!palette[code]) {
+        double dr, dg, db, bgLum = 1.0;
+        NSColor *bg = [defaultBg colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
         vt_palette_rgb(code, &r, &g, &b);
-        palette[code] = [[NSColor colorWithCalibratedRed:r / 255.0 green:g / 255.0
-                                                    blue:b / 255.0 alpha:1.0] retain];
+        dr = r / 255.0; dg = g / 255.0; db = b / 255.0;
+        if (bg) bgLum = hk_luminance([bg redComponent], [bg greenComponent], [bg blueComponent]);
+        hk_adjust_for_background(&dr, &dg, &db, bgLum);                 /* legible on this background (term/colours.c) */
+        palette[code] = [[NSColor colorWithCalibratedRed:dr green:dg blue:db alpha:1.0] retain];
     }
     return palette[code];
 }

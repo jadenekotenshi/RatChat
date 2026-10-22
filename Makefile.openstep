@@ -56,7 +56,7 @@ CORE_OBJS = core/irc_parse.o core/dcc.o core/aes.o core/bignum.o core/chacha.o c
             core/ecc.o core/hmac.o core/md5.o core/nacl.o core/rng.o core/rsa.o core/sha1.o \
             core/sha2.o core/wire.o core/x509.o core/tls_wire.o core/tls_prf.o \
             core/tls_aead_gcm.o core/tls_aead_chacha.o core/tls.o core/tls_pins.o
-TERM_OBJS = term/nsenc.o term/vt.o
+TERM_OBJS = term/nsenc.o term/vt.o term/colours.o
 APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IRCChannelSession.o \
             app/IRCConnection.o app/TerminalView.o app/UIHelpers.o app/main.o
 
