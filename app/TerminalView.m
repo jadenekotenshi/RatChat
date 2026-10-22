@@ -31,6 +31,13 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 - (BOOL)beginMouseReport:(NSEvent *)theEvent button:(int)button;
 @end
 
+/* Two advances are the same cell width (a bold face with another width would not fit the grid). */
+static int same_width(float a, float b)
+{
+    float d = a - b;
+    return d < 0.01 && d > -0.01;
+}
+
 @implementation TerminalView
 
 - (id)initWithFrame:(NSRect)frame
@@ -49,6 +56,20 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
     baseline = -bb.origin.y;                      /* distance from the cell bottom to the baseline */
     if (baseline < 0.0) baseline = 0.0;
 
+    /* A real bold face, if the font has one and it has the same advance (a terminal cell grid cannot take another width). */
+    {
+        NSFont *b = nil;
+        NSFontManager *fm = [NSFontManager sharedFontManager];
+        if (fm && [fm respondsToSelector:@selector(convertFont:toHaveTrait:)]) b = [fm convertFont:font toHaveTrait:NSBoldFontMask];
+        if (b == font || (b && !same_width([b widthOfString:@"M"], cellW))) b = nil;
+        if (!b) {
+            NSString *name = [[font fontName] stringByAppendingString:@"-Bold"];
+            b = [NSFont fontWithName:name size:[font pointSize]];
+            if (b && !same_width([b widthOfString:@"M"], cellW)) b = nil;
+        }
+        boldFont = [b retain];
+    }
+
     defaultFg = [[NSColor blackColor] retain];
     defaultBg = [[NSColor whiteColor] retain];
 
@@ -62,6 +83,8 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
         float fps = ([d objectForKey:@"TerminalMaxFPS"] != nil) ? [d floatForKey:@"TerminalMaxFPS"] : DEFAULT_MAX_FPS;
 
         minFlushInterval = (fps > 0.0) ? 1.0 / fps : 0.0;
+        boldStyle = [d integerForKey:@"TerminalBoldStyle"];
+        if (boldStyle < TV_BOLD_AUTO || boldStyle > TV_BOLD_COLOUR) boldStyle = TV_BOLD_AUTO;
         confirmPaste = ([d objectForKey:@"TerminalConfirmPaste"] == nil) ? YES : [d boolForKey:@"TerminalConfirmPaste"];
     }
     pasteAnswer = -1;
@@ -76,6 +99,7 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
     [flushTimer invalidate];
     vt_free(term);
     [font release];
+    [boldFont release];
     [defaultFg release];
     [defaultBg release];
     for (i = 0; i < 256; i++) [palette[i] release];
@@ -241,6 +265,7 @@ static int iceil(float x)  { int i = (int)x; return (x > (float)i) ? i + 1 : i; 
 - (int)flushCount { return flushCount; }
 - (float)lastFlushArea { return lastFlushArea; }
 - (void)setConfirmsMultilinePaste:(BOOL)flag { confirmPaste = flag; }
+- (BOOL)hasBoldFont { return boldFont != nil; }
 - (void)setPasteAnswer:(int)answer { pasteAnswer = answer; }
 
 - (void)writeBytes:(const unsigned char *)bytes length:(int)n
@@ -394,11 +419,13 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
         if ((key >> 18) & VT_DIM)
             fg = [fg blendedColorWithFraction:0.5 ofColor:[self colorForCode:bgc]];
         if (anyText) {
-            [font set];
+            BOOL bold = ((key >> 18) & VT_BOLD) != 0;
+            BOOL realBold = bold && boldFont && boldStyle == TV_BOLD_AUTO;
+            [(realBold ? boldFont : font) set];
             [fg set];
             PSmoveto(x, y + baseline);
             PSshow(buf);
-            if ((key >> 18) & VT_BOLD) {                     /* overstrike: works with any font */
+            if (bold && !realBold && boldStyle != TV_BOLD_COLOUR) {      /* overstrike: works with any font */
                 PSmoveto(x + 1.0, y + baseline);
                 PSshow(buf);
             }
