@@ -91,6 +91,23 @@ APP_OBJS  = app/AppController.o app/ConnectController.o app/DCCTransfer.o app/IR
 
 all: $(APP)/RatChat
 
+# Header dependencies: a changed header rebuilds what includes it.  (This makefile once kept an object file built
+# against an old struct layout; the link worked and the program misbehaved.)  tools/lint_openstep.sh checks the lists
+# are complete.
+
+TERM_HEADERS  = term/colours.h term/nsenc.h term/nsenc_tab.h term/vt.h
+CORE_HEADERS  = core/aes.h core/aes_tab.h core/bignum.h core/chacha.h core/dcc.h core/der.h core/ecc.h \
+                core/ecc_tab.h core/hmac.h core/irc_parse.h core/md5.h core/md5_tab.h core/nacl.h \
+                core/nacl_tab.h core/oscompat.h core/rng.h core/rsa.h core/sha1.h core/sha2.h core/sha2_tab.h \
+                core/ssh_types.h core/tls.h core/tls_aead_chacha.h core/tls_aead_gcm.h core/tls_pins.h \
+                core/tls_prf.h core/tls_priv.h core/tls_wire.h core/wire.h core/x509.h
+APP_HEADERS   = app/AppController.h app/Compat.h app/ConnectController.h app/DCCTransfer.h \
+                app/IRCChannelSession.h app/IRCConnection.h app/TerminalView.h app/UIHelpers.h app/oscompat.h \
+                $(TERM_HEADERS) $(CORE_HEADERS)
+$(TERM_OBJS): $(TERM_HEADERS)
+$(CORE_OBJS): $(CORE_HEADERS)
+$(APP_OBJS): $(APP_HEADERS)
+
 $(APP)/RatChat: $(CORE_OBJS) $(TERM_OBJS) $(APP_OBJS) $(ICONHDR) $(ICONTIFF)
 	-mkdir $(APP)
 	@( cd $(APP) ) >/dev/null 2>&1 || { echo "make: $(APP) is missing or is not a directory:"; ls -ld $(APP); echo "remove it and run make again"; exit 1; }

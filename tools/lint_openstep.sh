@@ -68,5 +68,18 @@ if command -v python3 >/dev/null 2>&1; then
     python3 tools/check_string_concat.py >/dev/null || { python3 tools/check_string_concat.py; status=1; }
 fi
 
+# --- the first rule in Makefile.openstep is the default goal: it has to be "all" ---
+first=$(grep -E '^[A-Za-z$(][^=#]*:' Makefile.openstep | head -1)
+case "$first" in
+all:*) ;;
+*) echo "LINT: the first rule in Makefile.openstep is '$first', not 'all:' (a plain make would build that instead of the app)"; status=1;;
+esac
+
+# --- every header must be listed in Makefile.openstep (or a change to it would not rebuild what includes it) ---
+for h in term/*.h core/*.h app/*.h; do
+    [ -f "$h" ] || continue
+    grep -q "$h" Makefile.openstep || { echo "LINT: $h is not listed in a *_HEADERS list in Makefile.openstep"; status=1; }
+done
+
 if [ $status -eq 0 ]; then echo "lint: clean"; fi
 exit $status
