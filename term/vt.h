@@ -44,6 +44,7 @@ typedef struct vt {
     vt_cell **line;            /* visible screen: rows row pointers */
     vt_cell **main_line, **alt_line;
     int in_alt;
+    unsigned long last_ch;                 /* the last character put on the screen, for CSI b (repeat); 0: none */
     vt_u8 *dirty;              /* per visible row */
     int *dirty_x0, *dirty_x1;  /* per visible row, valid where dirty[row]: the columns [x0, x1) that changed */
     int all_dirty;

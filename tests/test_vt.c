@@ -193,6 +193,23 @@ static void test_replies_title(void)
     vt_free(t);
 }
 
+static void test_repeat(void)
+{
+    vt *t = vt_new(20, 3, 0);
+
+    feed(t, "ab\033[3b");                                    /* b repeated three times */
+    CHECK(cell(t, 0, 0).ch == 'a' && cell(t, 0, 1).ch == 'b' && cell(t, 0, 2).ch == 'b' && cell(t, 0, 4).ch == 'b' && cell(t, 0, 5).ch == ' ');
+    feed(t, "\033[2J\033[H\033(0q\033[4b\033(B");            /* the line-drawing character, repeated as drawn */
+    CHECK(cell(t, 0, 0).ch == 0x2500 && cell(t, 0, 4).ch == 0x2500 && cell(t, 0, 5).ch == ' ');
+    feed(t, "\033[2J\033[H\033c\033[3b");                     /* nothing printed since the reset: nothing to repeat */
+    CHECK(cell(t, 0, 0).ch == ' ');
+    feed(t, "\033[2J\033[HxyZ\033[30b");                     /* repeats wrap like printed text */
+    CHECK(cell(t, 1, 0).ch == 'Z' && cell(t, 0, 19).ch == 'Z');
+    feed(t, "\033[2J\033[Hq\033[99999b");                    /* a huge count is bounded */
+    CHECK(cell(t, 2, 0).ch == 'q' && cell(t, 2, 1).ch == ' ');       /* 1 + 60 characters: it scrolled once, the 61st is at the start of the last row */
+    vt_free(t);
+}
+
 static void test_utf8_charsets(void)
 {
     vt *t = vt_new(20, 3, 0);
@@ -455,7 +472,7 @@ static void test_fuzz(void)
 int main(void)
 {
     test_basic(); test_wrap(); test_erase_edit(); test_sgr(); test_scroll();
-    test_alt_screen(); test_tabs_modes(); test_replies_title(); test_utf8_charsets();
+    test_alt_screen(); test_tabs_modes(); test_replies_title(); test_utf8_charsets(); test_repeat();
     test_nsenc(); test_resize(); test_keys_dirty(); test_dirty_spans(); test_mouse(); test_fuzz();
     TEST_DONE("vt");
 }

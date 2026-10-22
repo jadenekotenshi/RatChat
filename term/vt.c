@@ -232,15 +232,13 @@ static void emit_num(vt *t, int v)
 /* printing                                                            */
 /* ------------------------------------------------------------------ */
 
-static void put_cp(vt *t, vt_u32 cp)
+/* Puts an already-mapped character in the cell at the cursor and advances. */
+static void place_cp(vt *t, vt_u32 cp)
 {
     vt_cell *row;
     vt_cell *c;
-    int cs = t->shift ? t->g1 : t->g0;
 
-    if (cs == 1 && cp >= 0x5f && cp <= 0x7e) cp = DEC_GFX[cp - 0x5f];
-    if (cp > 0xffff) cp = '?';
-    if (cp >= 0x300 && cp <= 0x36f) return;                 /* combining marks: no cell for them */
+    t->last_ch = cp;
 
     if (t->wrap_pending) {
         if (t->autowrap) { t->cx = 0; index_down(t); }
@@ -257,6 +255,16 @@ static void put_cp(vt *t, vt_u32 cp)
     mark_cols(t, t->cy, t->cx, t->insert ? t->cols : t->cx + 1);       /* insert mode pushed the rest of the line along */
     if (t->cx == t->cols - 1) t->wrap_pending = t->autowrap ? 1 : 0;
     else t->cx++;
+}
+
+static void put_cp(vt *t, vt_u32 cp)
+{
+    int cs = t->shift ? t->g1 : t->g0;
+
+    if (cs == 1 && cp >= 0x5f && cp <= 0x7e) cp = DEC_GFX[cp - 0x5f];
+    if (cp > 0xffff) cp = '?';
+    if (cp >= 0x300 && cp <= 0x36f) return;                 /* combining marks: no cell for them */
+    place_cp(t, cp);
 }
 
 static void next_tab(vt *t, int n)
@@ -562,6 +570,11 @@ static void csi_dispatch(vt *t, int f)
     case '@': insert_chars(t, prm(t, 0, 1)); break;
     case 'P': delete_chars(t, prm(t, 0, 1)); break;
     case 'X': n = prm(t, 0, 1); erase_cells(t, t->cy, t->cx, t->cx + n); break;
+    case 'b':                                                       /* REP: repeat the last character n times */
+        n = prm(t, 0, 1);
+        if (n > t->rows * t->cols) n = t->rows * t->cols;
+        if (t->last_ch) while (n-- > 0) place_cp(t, (vt_u32)t->last_ch);
+        break;
     case 'S': scroll_up(t, t->top, t->bottom, prm(t, 0, 1), 1); break;
     case 'T': scroll_down(t, t->top, t->bottom, prm(t, 0, 1)); break;
     case 'g':
@@ -753,6 +766,7 @@ static void init_tabs(vt *t)
 void vt_reset(vt *t)
 {
     int r;
+    t->last_ch = 0;
     memset(&t->saved, 0, sizeof(t->saved));
     memset(&t->saved_alt, 0, sizeof(t->saved_alt));
     t->pen.fg = 0; t->pen.bg = 0; t->pen.attr = VT_DEFFG | VT_DEFBG;
