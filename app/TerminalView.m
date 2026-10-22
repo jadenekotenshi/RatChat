@@ -369,7 +369,7 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
 
 - (void)drawRow:(int)r cursor:(BOOL)withCursor fromCol:(int)c0 toCol:(int)c1
 {
-    int w = 0, c, e, n, i, fgc, bgc, fgc2, bgc2, line = r - scrollBack;
+    int w = 0, c, e, n, i, pass, fgc, bgc, fgc2, bgc2, line = r - scrollBack;
     const vt_cell *cells = vt_line_at(term, line, &w);
     NSRect rr = [self rectForRow:r];
     float x, y = rr.origin.y;
@@ -381,6 +381,9 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
 
     blank.ch = ' '; blank.fg = 0; blank.bg = 0; blank.attr = VT_DEFFG | VT_DEFBG;
 
+    /* Two passes over the row: every run's background, then every run's text.  A glyph may reach past its cell (a bold face's
+     * stems do), and a neighbour's background drawn afterwards would cut it off. */
+    for (pass = 0; pass < 2; pass++)
     for (c = c0; c < c1; ) {
         const vt_cell *cell = (cells && c < w) ? &cells[c] : &blank;
         int inv = [self cellIsSelectedLine:line col:c] ||
@@ -397,8 +400,12 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
         n = e - c;
         x = MARGIN + c * cellW;
 
-        [[self colorForCode:bgc] set];
-        NSRectFill(NSMakeRect(x, y, n * cellW + (e == cols ? MARGIN : 0.0), cellH));
+        if (pass == 0) {                                     /* backgrounds first ... */
+            [[self colorForCode:bgc] set];
+            NSRectFill(NSMakeRect(x, y, n * cellW + (e == cols ? MARGIN : 0.0), cellH));
+            c = e;
+            continue;
+        }
 
         anyText = NO;
         anyShape = NO;
