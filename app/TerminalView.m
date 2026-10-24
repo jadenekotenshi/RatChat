@@ -367,89 +367,150 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
     }
 }
 
+/* One run of cells of the row with the same look, as drawRow works it out before drawing anything. */
+typedef struct { int c, n, fgc, bgc; unsigned key; } DrawRun;
+static DrawRun *run_buf = NULL;
+static int run_cap = 0;
+static char *row_buf = NULL;
+static int row_cap = 0;
+
 - (void)drawRow:(int)r cursor:(BOOL)withCursor fromCol:(int)c0 toCol:(int)c1
 {
-    int w = 0, c, e, n, i, pass, fgc, bgc, fgc2, bgc2, line = r - scrollBack;
+    int w = 0, c, e, n, i, k, j, fgc, bgc, fgc2, bgc2, line = r - scrollBack, nruns = 0;
     const vt_cell *cells = vt_line_at(term, line, &w);
     NSRect rr = [self rectForRow:r];
     float x, y = rr.origin.y;
     unsigned key, key2;
     vt_cell blank;
     char buf[300];
-    BOOL anyText, anyShape;
-    NSColor *fg;
+    BOOL anyText, anyShape, haveSel = selActive != 0;
+    NSColor *fg, *lastColor = nil;
+    NSFont *lastFont = nil;
 
     blank.ch = ' '; blank.fg = 0; blank.bg = 0; blank.attr = VT_DEFFG | VT_DEFBG;
 
-    /* Two passes over the row: every run's background, then every run's text.  A glyph may reach past its cell (a bold face's
-     * stems do), and a neighbour's background drawn afterwards would cut it off. */
-    for (pass = 0; pass < 2; pass++)
-    for (c = c0; c < c1; ) {
+    /* The cell to the left of the range is drawn too: a glyph may reach past its cell (a bold face's stems do), and the
+     * background of the cell on its right, repainted now, has just wiped that.  (What lies outside the area being redrawn is
+     * clipped away, so this costs nothing where the range starts at the edge of the area.) */
+    if (c0 > 0) c0--;
+    if (c1 - c0 > run_cap) {
+        DrawRun *nb = (DrawRun *)realloc(run_buf, sizeof(DrawRun) * (size_t)(c1 - c0 + 16));
+        if (!nb) return;
+        run_buf = nb;
+        run_cap = c1 - c0 + 16;
+    }
+
+    /* 1. Work out the runs. */
+    for (c = c0; c < c1; c = e) {
         const vt_cell *cell = (cells && c < w) ? &cells[c] : &blank;
-        int inv = [self cellIsSelectedLine:line col:c] ||
-                  (withCursor && r == term->cy && c == term->cx);
+        int inv = (haveSel && [self cellIsSelectedLine:line col:c]) || (withCursor && r == term->cy && c == term->cx);
         key = cell_key(cell, inv, term->reverse_screen, &fgc, &bgc);
 
         for (e = c + 1; e < c1; e++) {                       /* extend the run */
             const vt_cell *cell2 = (cells && e < w) ? &cells[e] : &blank;
-            int inv2 = [self cellIsSelectedLine:line col:e] ||
-                       (withCursor && r == term->cy && e == term->cx);
+            int inv2 = (haveSel && [self cellIsSelectedLine:line col:e]) || (withCursor && r == term->cy && e == term->cx);
             key2 = cell_key(cell2, inv2, term->reverse_screen, &fgc2, &bgc2);
             if (key2 != key) break;
         }
-        n = e - c;
-        x = MARGIN + c * cellW;
+        run_buf[nruns].c = c; run_buf[nruns].n = e - c; run_buf[nruns].fgc = fgc; run_buf[nruns].bgc = bgc;
+        run_buf[nruns].key = key;
+        nruns++;
+    }
 
-        if (pass == 0) {                                     /* backgrounds first ... */
-            [[self colorForCode:bgc] set];
-            NSRectFill(NSMakeRect(x, y, n * cellW + (e == cols ? MARGIN : 0.0), cellH));
-            c = e;
-            continue;
-        }
+    /* 2. Backgrounds, all of them before any text (a neighbour's background drawn after a glyph would cut off what reaches
+     * past its cell).  drawRect: has already filled the area with the default background, so only the other colours need
+     * a fill, and neighbours of one colour are filled at once. */
+    for (k = 0; k < nruns; k = j) {
+        j = k + 1;
+        if (run_buf[k].bgc == CODE_DEFBG) continue;
+        while (j < nruns && run_buf[j].bgc == run_buf[k].bgc) j++;
+        n = run_buf[j - 1].c + run_buf[j - 1].n - run_buf[k].c;
+        [[self colorForCode:run_buf[k].bgc] set];
+        NSRectFill(NSMakeRect(MARGIN + run_buf[k].c * cellW, y, n * cellW + (run_buf[j - 1].c + run_buf[j - 1].n == cols ? MARGIN : 0.0), cellH));
+    }
 
-        anyText = NO;
-        anyShape = NO;
-        for (i = 0; i < n && i < (int)sizeof(buf) - 1; i++) {
-            const vt_cell *cl = (cells && c + i < w) ? &cells[c + i] : &blank;
-            int b = nsenc_encode(cl->ch);
+    /* 3. The characters of the whole range at once (one lookup per cell, not per run). */
+    if (c1 - c0 > row_cap) {
+        char *nb = (char *)realloc(row_buf, (size_t)(c1 - c0 + 16));
+        if (!nb) return;
+        row_buf = nb;
+        row_cap = c1 - c0 + 16;
+    }
+    anyShape = NO;
+    for (c = c0; c < c1; c++) {
+        const vt_cell *cl = (cells && c < w) ? &cells[c] : &blank;
+        int b;
+        if (cl->ch < 0x80 && cl->ch >= 0x20) { b = cl->ch; }                   /* plain ASCII: no lookup */
+        else {
+            b = nsenc_encode(cl->ch);
             if (vt_box_arms(cl->ch) || vt_block_kind(cl->ch)) { b = ' '; anyShape = YES; }      /* painted below */
             if (b < 0) b = nsenc_encode(vt_fallback_char(cl->ch));
             if (b < 0) b = '?';
             if (b == 0) b = ' ';
-            buf[i] = (char)b;
-            if (b != ' ') anyText = YES;
         }
-        buf[i] = '\0';
-        while (i > 0 && buf[i - 1] == ' ') buf[--i] = '\0';      /* don't paint trailing blanks */
+        row_buf[c - c0] = (char)b;
+    }
 
+    /* 4. The text: neighbouring runs that differ only in their background are shown with one call (the characters are
+     * on a fixed grid, so a blank stands in for the cells that need no ink).  Then the shapes and the underlines. */
+    for (k = 0; k < nruns; k = j) {
+        unsigned look = run_buf[k].key & ~(0x1ffu << 9);         /* everything but the background */
+        BOOL dim = ((run_buf[k].key >> 18) & VT_DIM) != 0;
+        BOOL bold, realBold;
+        NSFont *want;
+
+        for (j = k + 1; j < nruns; j++) {
+            if ((run_buf[j].key & ~(0x1ffu << 9)) != look) break;
+            if (dim && run_buf[j].bgc != run_buf[k].bgc) break;      /* (a dim colour is blended with its own background) */
+        }
+        c = run_buf[k].c;
+        n = run_buf[j - 1].c + run_buf[j - 1].n - c;
+        x = MARGIN + c * cellW;
+        fgc = run_buf[k].fgc;
+        bgc = run_buf[k].bgc;
+        key = run_buf[k].key;
+        {   /* the slice, without trailing blanks */
+            int len = n;
+            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+            memcpy(buf, row_buf + (c - c0), (size_t)len);
+            while (len > 0 && buf[len - 1] == ' ') len--;
+            buf[len] = '\0';
+            anyText = len > 0;
+        }
         fg = [self colorForCode:fgc];
-        if ((key >> 18) & VT_DIM)
-            fg = [fg blendedColorWithFraction:0.5 ofColor:[self colorForCode:bgc]];
+        if (dim) fg = [fg blendedColorWithFraction:0.5 ofColor:[self colorForCode:bgc]];
+        bold = ((key >> 18) & VT_BOLD) != 0;
+        realBold = bold && boldFont && boldStyle == TV_BOLD_AUTO;
+        want = realBold ? boldFont : font;
         if (anyText) {
-            BOOL bold = ((key >> 18) & VT_BOLD) != 0;
-            BOOL realBold = bold && boldFont && boldStyle == TV_BOLD_AUTO;
-            [(realBold ? boldFont : font) set];
-            [fg set];
+            if (want != lastFont) { [want set]; lastFont = want; }
+            if (fg != lastColor) { [fg set]; lastColor = fg; }
             PSmoveto(x, y + baseline);
             PSshow(buf);
             if (bold && !realBold && boldStyle != TV_BOLD_COLOUR) {      /* overstrike: works with any font */
                 PSmoveto(x + 1.0, y + baseline);
                 PSshow(buf);
-            }
+                }
         }
-        if (anyShape) {
-            for (i = 0; i < n; i++) {
-                const vt_cell *cl = (cells && c + i < w) ? &cells[c + i] : &blank;
+        if ((key >> 18) & VT_UNDERLINE) {
+            if (fg != lastColor) { [fg set]; lastColor = fg; }
+            NSRectFill(NSMakeRect(x, y + baseline - 1.5, n * cellW, 1.0));
+        }
+    }
+    if (anyShape) {
+        for (k = 0; k < nruns; k++) {
+            fgc = run_buf[k].fgc; bgc = run_buf[k].bgc;
+            fg = [self colorForCode:fgc];
+            if ((run_buf[k].key >> 18) & VT_DIM) fg = [fg blendedColorWithFraction:0.5 ofColor:[self colorForCode:bgc]];
+            for (i = 0; i < run_buf[k].n; i++) {
+                const vt_cell *cl;
+                c = run_buf[k].c + i;
+                cl = (cells && c < w) ? &cells[c] : &blank;
                 if (vt_box_arms(cl->ch) || vt_block_kind(cl->ch))
-                    [self drawShape:cl->ch inRect:NSMakeRect(x + i * cellW, y, cellW, cellH)
+                    [self drawShape:cl->ch inRect:NSMakeRect(MARGIN + c * cellW, y, cellW, cellH)
                               color:fg background:[self colorForCode:bgc]];
             }
         }
-        if ((key >> 18) & VT_UNDERLINE) {
-            [fg set];
-            NSRectFill(NSMakeRect(x, y + baseline - 1.5, n * cellW, 1.0));
-        }
-        c = e;
     }
 }
 
@@ -460,6 +521,7 @@ static unsigned cell_key(const vt_cell *c, int invert, int reverse_screen,
     BOOL live = (scrollBack == 0 && term->cursor_visible);
     NSRect b = [self bounds];
 
+    NSRectClip(rect);                                        /* (drawRow reaches a cell beyond each end: it must not paint there) */
     [defaultBg set];
     NSRectFill(rect);
 
